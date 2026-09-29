@@ -1,0 +1,6 @@
+{
+  "name": "Zypso Mart Admin",
+  "description": "Real-time admin manager dashboard for Zypso Mart to oversee orders, manage product catalog, and handle return requests and status transitions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

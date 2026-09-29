@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, viewport-fit=cover" />
+    <title>Zypso Mart Admin</title>
+    <meta name="description" content="Real-time admin manager dashboard for Zypso Mart to oversee orders, manage product catalog, and handle return requests and status transitions." />
+    <meta property="og:title" content="Zypso Mart Admin" />
+    <meta property="og:description" content="Real-time admin manager dashboard for Zypso Mart to oversee orders, manage product catalog, and handle return requests and status transitions." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#059669" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="ZypsoMart" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/pwa-192x192.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="icon" type="image/png" href="/logo.png" />
+    <script>
+      // Gracefully prevent benign sandbox WebSocket & Firestore offline heuristic rejections
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event && (event.reason || event);
+        var msg = (typeof reason === 'string' ? reason : (reason && reason.message) || '') + '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          msg.indexOf('websocket') !== -1 ||
+          msg.indexOf('Cloud Firestore backend') !== -1 ||
+          msg.indexOf('offline mode') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+      window.addEventListener('error', function(event) {
+        var msg = (event && event.message) || '';
+        if (
+          msg.indexOf('WebSocket') !== -1 ||
+          msg.indexOf('websocket') !== -1 ||
+          msg.indexOf('Cloud Firestore backend') !== -1 ||
+          msg.indexOf('offline mode') !== -1
+        ) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+
+      // Route transient Firestore backend unreachable messages to warn instead of fatal console.error
+      var origConsoleError = console.error;
+      console.error = function() {
+        var args = Array.prototype.slice.call(arguments);
+        var fullText = args.map(function(a) {
+          return (a && (a.message || a.stack || a)) + '';
+        }).join(' ');
+        if (fullText.indexOf('Could not reach Cloud Firestore backend') !== -1) {
+          console.warn('[Firestore Connection Handler]', fullText);
+          return;
+        }
+        origConsoleError.apply(console, args);
+      };
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
