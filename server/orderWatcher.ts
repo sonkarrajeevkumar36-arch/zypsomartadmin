@@ -3,7 +3,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import {
   dispatchNewOrderAlarm,
   hasOrderBeenAlerted,
-  recordOrderAlert
+  hasAdminServiceAccountCredentials
 } from "./fcmController.js";
 
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "zypso-mart-cd989";
@@ -17,7 +17,7 @@ let pollingInterval: NodeJS.Timeout | null = null;
 let firestoreUnsubscribe: (() => void) | null = null;
 
 /**
- * Format address helper
+ * Format helpers
  */
 function extractTotal(fields: Record<string, any>): number {
   if (!fields) return 0;
@@ -147,14 +147,19 @@ async function checkRecentOrdersViaREST() {
     }
   } catch (err) {
     // Non-blocking background log
-    // console.warn("[Order Watcher] Polling check notice:", err);
   }
 }
 
 /**
- * Start real-time Firestore Admin listener if Admin credentials are active
+ * Start real-time Firestore Admin listener if Admin Service Account credentials are active.
+ * If running in standard API-key mode, cleanly bypasses gRPC to avoid permission errors.
  */
 function attachAdminFirestoreListener(): boolean {
+  if (!hasAdminServiceAccountCredentials()) {
+    console.log("[Order Watcher] API key mode active. Background order monitoring loop running (5s intervals).");
+    return false;
+  }
+
   try {
     const apps = getApps();
     if (apps.length === 0) return false;
@@ -180,14 +185,17 @@ function attachAdminFirestoreListener(): boolean {
           }
         });
       },
-      (error) => {
-        console.warn("[Order Watcher] Firestore onSnapshot warning (fallback to REST polling active):", error.message);
+      (error: any) => {
+        if (firestoreUnsubscribe) {
+          firestoreUnsubscribe();
+          firestoreUnsubscribe = null;
+        }
+        console.log("[Order Watcher] Admin onSnapshot unsubscribed. REST polling loop active for new orders.");
       }
     );
 
     return true;
   } catch (err: any) {
-    console.warn("[Order Watcher] Could not attach Admin onSnapshot:", err?.message || err);
     return false;
   }
 }
@@ -201,7 +209,7 @@ export async function startServerOrderWatcher() {
   // 1. Seed existing orders into memory
   await seedExistingOrders();
 
-  // 2. Attach real-time onSnapshot listener
+  // 2. Attach real-time onSnapshot listener only if admin service account credentials exist
   attachAdminFirestoreListener();
 
   // 3. Start high-frequency REST polling loop (every 5 seconds) as guaranteed dual-redundant safety net

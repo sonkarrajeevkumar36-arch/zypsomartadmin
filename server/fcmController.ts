@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
-import { initializeApp, getApps, cert, applicationDefault, type App } from "firebase-admin/app";
+import fs from "fs";
+import path from "path";
+import { initializeApp, getApps, deleteApp, cert, type App } from "firebase-admin/app";
 import { getMessaging, type MulticastMessage } from "firebase-admin/messaging";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
@@ -7,14 +9,121 @@ const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "zypso-mart-cd989
 const FIRESTORE_REST_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 const FIREBASE_API_KEY = "AIzaSyDxztzPoCTCzckaEsvupHJOyCHEhAxr9DU";
 
+// Local storage directory for server token persistence
+const DATA_DIR = path.join(process.cwd(), ".data");
+const TOKENS_FILE = path.join(DATA_DIR, "admin_tokens.json");
+const SERVICE_ACCOUNT_FILE = path.join(DATA_DIR, "service-account.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {}
+}
+
+// In-memory persistent map of registered admin device tokens
+interface DeviceTokenInfo {
+  token: string;
+  adminEmail: string;
+  deviceType?: string;
+  browser?: string;
+  platform?: string;
+  userAgent?: string;
+  enabled: boolean;
+  loggedIn: boolean;
+  updatedAt: string;
+}
+
+const persistentDeviceTokensMap = new Map<string, DeviceTokenInfo>();
+
+// Load cached tokens from disk on startup
+function loadTokensFromDisk() {
+  try {
+    if (fs.existsSync(TOKENS_FILE)) {
+      const raw = fs.readFileSync(TOKENS_FILE, "utf8");
+      const list: DeviceTokenInfo[] = JSON.parse(raw);
+      for (const item of list) {
+        if (item.token) {
+          persistentDeviceTokensMap.set(item.token, item);
+        }
+      }
+      console.log(`[FCM Backend] Loaded ${persistentDeviceTokensMap.size} admin device token(s) from local cache.`);
+    }
+  } catch (err) {
+    console.warn("[FCM Backend] Error loading tokens from disk:", err);
+  }
+}
+
+function saveTokensToDisk() {
+  try {
+    const list = Array.from(persistentDeviceTokensMap.values());
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(list, null, 2), "utf8");
+  } catch (err) {
+    console.warn("[FCM Backend] Error saving tokens to disk:", err);
+  }
+}
+
+loadTokensFromDisk();
+
 // In-memory cache of alerted order IDs for ultra-fast local duplicate protection
 export const alertedOrderIdsCache = new Set<string>();
 
 let adminApp: App | null = null;
 
 /**
- * Initialize Firebase Admin SDK using Service Account credentials or Application Default Credentials.
- * This utilizes FCM HTTP v1 under the hood (no deprecated legacy server keys).
+ * Check if the server environment has explicit Firebase Admin Service Account credentials
+ */
+export function hasAdminServiceAccountCredentials(): boolean {
+  if (fs.existsSync(SERVICE_ACCOUNT_FILE)) return true;
+  if (fs.existsSync(path.join(process.cwd(), "service-account.json"))) return true;
+  return Boolean(
+    process.env.FIREBASE_SERVICE_ACCOUNT ||
+    process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
+    process.env.GOOGLE_SERVICE_ACCOUNT ||
+    process.env.GOOGLE_APPLICATION_CREDENTIALS
+  );
+}
+
+/**
+ * Parse Service Account object from env or local file
+ */
+function getServiceAccountObject(): any {
+  if (fs.existsSync(SERVICE_ACCOUNT_FILE)) {
+    try {
+      return JSON.parse(fs.readFileSync(SERVICE_ACCOUNT_FILE, "utf8"));
+    } catch {}
+  }
+  const rootSA = path.join(process.cwd(), "service-account.json");
+  if (fs.existsSync(rootSA)) {
+    try {
+      return JSON.parse(fs.readFileSync(rootSA, "utf8"));
+    } catch {}
+  }
+
+  const raw =
+    process.env.FIREBASE_SERVICE_ACCOUNT ||
+    process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
+    process.env.GOOGLE_SERVICE_ACCOUNT;
+
+  if (raw) {
+    try {
+      const trimmed = raw.trim();
+      if (trimmed.startsWith("{")) return JSON.parse(trimmed);
+      const decoded = Buffer.from(trimmed, "base64").toString("utf8");
+      if (decoded.trim().startsWith("{")) return JSON.parse(decoded);
+    } catch {}
+  }
+
+  if (process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(process.env.GOOGLE_APPLICATION_CREDENTIALS)) {
+    try {
+      return JSON.parse(fs.readFileSync(process.env.GOOGLE_APPLICATION_CREDENTIALS, "utf8"));
+    } catch {}
+  }
+
+  return null;
+}
+
+/**
+ * Initialize Firebase Admin SDK using Service Account credentials for zypso-mart-cd989
  */
 export function getFirebaseAdmin(): App | null {
   const existingApps = getApps();
@@ -24,41 +133,22 @@ export function getFirebaseAdmin(): App | null {
   }
 
   try {
-    const serviceAccountRaw =
-      process.env.FIREBASE_SERVICE_ACCOUNT ||
-      process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
-      process.env.GOOGLE_SERVICE_ACCOUNT;
-
-    if (serviceAccountRaw) {
-      let certObj: any;
-      const trimmed = serviceAccountRaw.trim();
-      if (trimmed.startsWith("{")) {
-        certObj = JSON.parse(trimmed);
-      } else {
-        const decoded = Buffer.from(trimmed, "base64").toString("utf8");
-        if (decoded.trim().startsWith("{")) {
-          certObj = JSON.parse(decoded);
-        }
-      }
-
-      if (certObj) {
-        console.log("[Firebase Admin] Initializing with service account credentials for HTTP v1...");
-        adminApp = initializeApp({
-          credential: cert(certObj),
-          projectId: certObj.project_id || FIREBASE_PROJECT_ID
-        });
-        return adminApp;
-      }
+    const certObj = getServiceAccountObject();
+    if (certObj) {
+      console.log("[Firebase Admin] Initializing with service account credentials for HTTP v1...");
+      adminApp = initializeApp({
+        credential: cert(certObj),
+        projectId: certObj.project_id || FIREBASE_PROJECT_ID
+      });
+      return adminApp;
     }
 
-    // Attempt Application Default Credentials (e.g. Cloud Run, GCP environment, or GOOGLE_APPLICATION_CREDENTIALS)
+    // Default initialization with projectId only
     adminApp = initializeApp({
-      credential: applicationDefault(),
       projectId: FIREBASE_PROJECT_ID
     });
     return adminApp;
   } catch (err: any) {
-    // Fallback: initialize with projectId only so Firestore/Messaging instances are reachable
     try {
       adminApp = initializeApp({
         projectId: FIREBASE_PROJECT_ID
@@ -70,13 +160,62 @@ export function getFirebaseAdmin(): App | null {
   }
 }
 
-// Eager initialization of Admin App
 getFirebaseAdmin();
 
 /**
+ * Endpoint to configure Service Account JSON from Admin UI settings
+ */
+export async function configureServiceAccountController(req: Request, res: Response) {
+  try {
+    const { serviceAccountJson } = req.body;
+    if (!serviceAccountJson) {
+      return res.status(400).json({ error: "Missing serviceAccountJson payload" });
+    }
+
+    let parsed: any;
+    if (typeof serviceAccountJson === "string") {
+      parsed = JSON.parse(serviceAccountJson.trim());
+    } else {
+      parsed = serviceAccountJson;
+    }
+
+    if (!parsed.project_id || !parsed.private_key || !parsed.client_email) {
+      return res.status(400).json({
+        error: "Invalid service account JSON. Must contain project_id, private_key, and client_email."
+      });
+    }
+
+    // Save to disk
+    fs.writeFileSync(SERVICE_ACCOUNT_FILE, JSON.stringify(parsed, null, 2), "utf8");
+
+    // Re-initialize Firebase Admin
+    const apps = getApps();
+    for (const app of apps) {
+      await deleteApp(app).catch(() => {});
+    }
+
+    adminApp = initializeApp({
+      credential: cert(parsed),
+      projectId: parsed.project_id || FIREBASE_PROJECT_ID
+    });
+
+    console.log("[Firebase Admin] Successfully configured and initialized service account for:", parsed.project_id);
+
+    return res.json({
+      success: true,
+      message: `Service Account for project ${parsed.project_id} configured successfully. FCM HTTP v1 push notifications active.`
+    });
+  } catch (err: any) {
+    console.error("[Firebase Admin] Error configuring service account:", err);
+    return res.status(500).json({ error: err.message || "Failed to parse service account" });
+  }
+}
+
+/**
  * Register or update an admin device FCM token
- * Stored in Firestore collection: `admin_device_tokens`
- * Only logged-in admin devices receive push alerts!
+ * Stored in:
+ * 1. Persistent in-memory map & disk cache
+ * 2. Firestore collection `admin_device_tokens` (if authenticated)
  */
 export async function registerDeviceTokenController(req: Request, res: Response) {
   try {
@@ -86,66 +225,45 @@ export async function registerDeviceTokenController(req: Request, res: Response)
       return res.status(400).json({ error: "Missing or invalid device token" });
     }
 
+    // 1. Save in server local persistent memory & disk
+    const info: DeviceTokenInfo = {
+      token,
+      adminEmail: adminEmail || "admin@zypsomart.com",
+      deviceType: deviceType || "desktop",
+      browser: browser || "Unknown",
+      platform: platform || "Unknown",
+      userAgent: (userAgent || "").substring(0, 200),
+      enabled: true,
+      loggedIn: true,
+      updatedAt: new Date().toISOString()
+    };
+
+    persistentDeviceTokensMap.set(token, info);
+    saveTokensToDisk();
+    console.log(`[FCM Backend] Registered device token (${info.deviceType} / ${info.browser}). Total devices: ${persistentDeviceTokensMap.size}`);
+
+    // 2. Also sync to Firestore if Admin SDK is authenticated
     const app = getFirebaseAdmin();
-    // Try Firestore Admin SDK first if available
-    try {
-      if (app) {
+    if (app && hasAdminServiceAccountCredentials()) {
+      try {
         const db = getFirestore(app);
         const docId = Buffer.from(token).toString("base64url").substring(0, 80);
         await db.collection("admin_device_tokens").doc(docId).set(
           {
-            token,
-            adminEmail: adminEmail || "admin@zypsomart.com",
-            deviceType: deviceType || "desktop",
-            browser: browser || "Unknown",
-            platform: platform || "Unknown",
-            userAgent: (userAgent || "").substring(0, 200),
-            enabled: true,
-            loggedIn: true,
+            ...info,
             updatedAt: FieldValue.serverTimestamp()
           },
           { merge: true }
         );
-
-        return res.json({
-          success: true,
-          message: "Device registered for new order alarm alerts successfully."
-        });
+      } catch (err) {
+        console.warn("[FCM Backend] Firestore token write notice:", err);
       }
-    } catch (adminErr) {
-      // Fall through to REST API below
-    }
-
-    // Fallback to Firestore REST API with API key
-    const docId = Buffer.from(token).toString("base64url").substring(0, 80);
-    const url = `${FIRESTORE_REST_BASE}/admin_device_tokens/${encodeURIComponent(docId)}?key=${FIREBASE_API_KEY}`;
-
-    const firestoreFields: Record<string, any> = {
-      token: { stringValue: token },
-      adminEmail: { stringValue: adminEmail || "admin@zypsomart.com" },
-      deviceType: { stringValue: deviceType || "desktop" },
-      browser: { stringValue: browser || "Unknown" },
-      platform: { stringValue: platform || "Unknown" },
-      userAgent: { stringValue: (userAgent || "").substring(0, 200) },
-      enabled: { booleanValue: true },
-      loggedIn: { booleanValue: true },
-      updatedAt: { timestampValue: new Date().toISOString() }
-    };
-
-    const response = await fetch(url, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fields: firestoreFields })
-    });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      console.warn(`[FCM Backend] Token save returned ${response.status}:`, errText);
     }
 
     return res.json({
       success: true,
-      message: "Device registered for new order alarm alerts successfully."
+      message: "Device registered for new order alarm alerts successfully.",
+      deviceTokensCount: persistentDeviceTokensMap.size
     });
   } catch (err: any) {
     console.error("[FCM Backend] Error registering device token:", err);
@@ -163,20 +281,17 @@ export async function unregisterDeviceTokenController(req: Request, res: Respons
       return res.status(400).json({ error: "Missing token" });
     }
 
-    const docId = Buffer.from(token).toString("base64url").substring(0, 80);
-    const app = getFirebaseAdmin();
+    persistentDeviceTokensMap.delete(token);
+    saveTokensToDisk();
 
-    try {
-      if (app) {
+    const app = getFirebaseAdmin();
+    if (app && hasAdminServiceAccountCredentials()) {
+      try {
+        const docId = Buffer.from(token).toString("base64url").substring(0, 80);
         await getFirestore(app).collection("admin_device_tokens").doc(docId).delete();
-        return res.json({ success: true, message: "Device unregistered." });
-      }
-    } catch {
-      // Fall through to REST API
+      } catch {}
     }
 
-    const url = `${FIRESTORE_REST_BASE}/admin_device_tokens/${encodeURIComponent(docId)}?key=${FIREBASE_API_KEY}`;
-    await fetch(url, { method: "DELETE" }).catch(() => {});
     return res.json({ success: true, message: "Device unregistered." });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Internal server error" });
@@ -187,71 +302,63 @@ export async function unregisterDeviceTokenController(req: Request, res: Respons
  * Helper to get all registered and logged-in admin device tokens
  */
 export async function getAllAdminTokens(): Promise<string[]> {
+  const tokens = new Set<string>();
+
+  // 1. From server local persistent cache
+  for (const [t, info] of persistentDeviceTokensMap.entries()) {
+    if (info.enabled && info.loggedIn !== false) {
+      tokens.add(t);
+    }
+  }
+
+  // 2. From Firestore Admin if authenticated
   const app = getFirebaseAdmin();
-  // 1. Try Firebase Admin Firestore
-  try {
-    if (app) {
+  if (app && hasAdminServiceAccountCredentials()) {
+    try {
       const snapshot = await getFirestore(app)
         .collection("admin_device_tokens")
         .where("enabled", "==", true)
         .get();
 
-      const tokens: string[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        // Only send to logged-in devices
         if (data.token && data.loggedIn !== false) {
-          tokens.push(data.token);
+          tokens.add(data.token);
+          if (!persistentDeviceTokensMap.has(data.token)) {
+            persistentDeviceTokensMap.set(data.token, {
+              token: data.token,
+              adminEmail: data.adminEmail || "admin@zypsomart.com",
+              deviceType: data.deviceType || "desktop",
+              browser: data.browser || "Unknown",
+              platform: data.platform || "Unknown",
+              enabled: true,
+              loggedIn: true,
+              updatedAt: new Date().toISOString()
+            });
+          }
         }
       });
-      if (tokens.length > 0) return tokens;
-    }
-  } catch {
-    // Fall back to REST API below
+      saveTokensToDisk();
+    } catch {}
   }
 
-  // 2. Fallback to Firestore REST API
-  try {
-    const url = `${FIRESTORE_REST_BASE}/admin_device_tokens?key=${FIREBASE_API_KEY}&pageSize=100`;
-    const response = await fetch(url);
-    if (!response.ok) return [];
-
-    const json = await response.json();
-    const documents = json.documents || [];
-    const tokens: string[] = [];
-
-    for (const doc of documents) {
-      const fields = doc.fields || {};
-      const token = fields.token?.stringValue;
-      const enabled = fields.enabled?.booleanValue ?? true;
-      const loggedIn = fields.loggedIn?.booleanValue ?? true;
-      if (token && enabled && loggedIn) {
-        tokens.push(token);
-      }
-    }
-    return tokens;
-  } catch (err) {
-    console.warn("[FCM Backend] Failed to fetch admin tokens from Firestore:", err);
-    return [];
-  }
+  return Array.from(tokens);
 }
 
 /**
- * Remove stale or invalid registration token from Firestore
+ * Remove stale or invalid registration token
  */
 export async function removeStaleToken(token: string) {
+  persistentDeviceTokensMap.delete(token);
+  saveTokensToDisk();
+
   try {
-    const docId = Buffer.from(token).toString("base64url").substring(0, 80);
     const app = getFirebaseAdmin();
-    if (app) {
+    if (app && hasAdminServiceAccountCredentials()) {
+      const docId = Buffer.from(token).toString("base64url").substring(0, 80);
       await getFirestore(app).collection("admin_device_tokens").doc(docId).delete();
-      return;
     }
-    const url = `${FIRESTORE_REST_BASE}/admin_device_tokens/${encodeURIComponent(docId)}?key=${FIREBASE_API_KEY}`;
-    await fetch(url, { method: "DELETE" }).catch(() => {});
-  } catch {
-    // Ignore cleanup errors
-  }
+  } catch {}
 }
 
 /**
@@ -261,16 +368,14 @@ export async function hasOrderBeenAlerted(orderId: string): Promise<boolean> {
   if (alertedOrderIdsCache.has(orderId)) return true;
 
   const app = getFirebaseAdmin();
-  try {
-    if (app) {
+  if (app && hasAdminServiceAccountCredentials()) {
+    try {
       const doc = await getFirestore(app).collection("adminAlerts").doc(orderId).get();
       if (doc.exists) {
         alertedOrderIdsCache.add(orderId);
         return true;
       }
-    }
-  } catch {
-    // Fall back to REST API
+    } catch {}
   }
 
   try {
@@ -293,8 +398,8 @@ export async function recordOrderAlert(orderId: string, details: { customerName?
   alertedOrderIdsCache.add(orderId);
 
   const app = getFirebaseAdmin();
-  try {
-    if (app) {
+  if (app && hasAdminServiceAccountCredentials()) {
+    try {
       await getFirestore(app).collection("adminAlerts").doc(orderId).set({
         orderId,
         customerName: details.customerName || "Customer",
@@ -303,9 +408,7 @@ export async function recordOrderAlert(orderId: string, details: { customerName?
         status: "sent"
       });
       return;
-    }
-  } catch {
-    // Fall back to REST API
+    } catch {}
   }
 
   try {
@@ -323,32 +426,32 @@ export async function recordOrderAlert(orderId: string, details: { customerName?
         }
       })
     });
-  } catch (err) {
-    console.warn("[FCM Backend] Record alert error:", err);
-  }
+  } catch {}
 }
 
 /**
  * Send FCM Push Notification via Firebase Admin SDK (FCM HTTP v1 Multicast).
  * Android channel: "Zypsomart New Orders" (channelId: "zypsomart_new_orders")
- * Notification title: "🚨 NEW ORDER"
- * Custom sound: "new_order_alarm"
+ * Sound: "new_order_alarm"
  */
 export async function sendFCMPush(
   tokens: string[],
-  orderData: {
-    orderId: string;
-    customerName: string;
-    total: number | string;
+  notificationData: {
+    title: string;
+    body: string;
+    orderId?: string;
+    customerName?: string;
+    total?: number | string;
+    url?: string;
     isTest?: boolean;
   }
 ) {
-  const isTest = !!orderData.isTest;
-  const title = isTest ? "🚨 [TEST ALARM] NEW ORDER" : "🚨 NEW ORDER";
-  const body = `Order #${orderData.orderId} • ₹${orderData.total} from ${orderData.customerName}`;
-  const targetUrl = `/?orderId=${encodeURIComponent(orderData.orderId)}&tab=orders`;
+  const title = notificationData.title || "🚨 NEW ZYPSOMART ORDER";
+  const body = notificationData.body || "New order received.";
+  const orderId = notificationData.orderId || "";
+  const targetUrl = notificationData.url || (orderId ? `/?orderId=${encodeURIComponent(orderId)}&tab=orders` : "/?tab=orders");
 
-  console.log(`[FCM HTTP v1] Preparing dispatch to ${tokens.length} registered admin device(s) for Order #${orderData.orderId}`);
+  console.log(`[FCM HTTP v1] Preparing dispatch to ${tokens.length} registered admin device(s)`);
 
   if (tokens.length === 0) {
     return { success: true, count: 0, reason: "No registered device tokens found" };
@@ -357,8 +460,7 @@ export async function sendFCMPush(
   try {
     const app = getFirebaseAdmin();
     if (!app) {
-      console.warn("[FCM HTTP v1] Firebase Admin app could not be initialized.");
-      return { success: true, count: tokens.length, sentViaFCM: false };
+      return { success: false, count: 0, error: "Firebase Admin app could not be initialized." };
     }
 
     const messaging = getMessaging(app);
@@ -371,11 +473,13 @@ export async function sendFCMPush(
         body
       },
       data: {
-        orderId: String(orderData.orderId),
-        customerName: String(orderData.customerName),
-        total: String(orderData.total),
+        title,
+        body,
+        orderId: String(orderId),
+        customerName: String(notificationData.customerName || ""),
+        total: String(notificationData.total || ""),
         url: targetUrl,
-        type: isTest ? "test_alarm" : "new_order_alarm",
+        type: notificationData.isTest ? "test_notification" : "new_order_alarm",
         timestamp: String(Date.now())
       },
       android: {
@@ -390,7 +494,7 @@ export async function sendFCMPush(
           defaultVibrateTimings: false,
           vibrateTimingsMillis: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
           clickAction: targetUrl,
-          tag: `new-order-${orderData.orderId}`
+          tag: orderId ? `new-order-${orderId}` : "test-notification"
         }
       },
       webpush: {
@@ -402,15 +506,16 @@ export async function sendFCMPush(
           body,
           icon: "/pwa-192x192.png",
           badge: "/favicon.png",
-          tag: `new-order-${orderData.orderId}`,
+          tag: orderId ? `new-order-${orderId}` : "test-notification",
           renotify: true,
           requireInteraction: true,
           vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
           data: {
             url: targetUrl,
-            orderId: String(orderData.orderId),
-            customerName: String(orderData.customerName),
-            total: String(orderData.total)
+            orderId: String(orderId),
+            customerName: String(notificationData.customerName || ""),
+            total: String(notificationData.total || ""),
+            type: notificationData.isTest ? "test_notification" : "new_order_alarm"
           },
           actions: [
             { action: "view", title: "👀 View Order" },
@@ -424,7 +529,7 @@ export async function sendFCMPush(
     };
 
     const response = await messaging.sendEachForMulticast(message);
-    console.log(`[FCM HTTP v1] Multicast dispatch result: ${response.successCount} sent successfully, ${response.failureCount} failed.`);
+    console.log(`[FCM HTTP v1] Dispatch result: ${response.successCount} sent successfully, ${response.failureCount} failed.`);
 
     // Automatically prune stale / unregistered tokens
     if (response.failureCount > 0) {
@@ -448,18 +553,20 @@ export async function sendFCMPush(
       sentViaFCM: true
     };
   } catch (err: any) {
-    console.warn("[FCM HTTP v1] Firebase Admin messaging push dispatch notice:", err?.message || err);
+    console.warn("[FCM HTTP v1] Push dispatch error:", err?.message || err);
     return {
-      success: true,
-      count: tokens.length,
+      success: false,
+      count: 0,
       sentViaFCM: false,
-      notice: err?.message || "Admin credentials not configured in local environment"
+      error: err?.message || "Failed to send FCM push"
     };
   }
 }
 
 /**
- * Unified dispatch handler for new order alarms
+ * Unified dispatch handler for real new order alarms
+ * Title: 🚨 NEW ZYPSOMART ORDER
+ * Body: New order received. Order ID: {orderId} | Total: ₹{total}
  */
 export async function dispatchNewOrderAlarm(
   orderId: string,
@@ -487,10 +594,15 @@ export async function dispatchNewOrderAlarm(
 
   // 3. Send FCM Push to all registered & logged-in admin devices via Firebase Admin SDK (HTTP v1)
   const tokens = await getAllAdminTokens();
+  const formattedTotal = Number(details.total || 0).toLocaleString("en-IN");
+
   const result = await sendFCMPush(tokens, {
+    title: "🚨 NEW ZYPSOMART ORDER",
+    body: `New order received. Order ID: ${orderId} | Total: ₹${formattedTotal}`,
     orderId,
     customerName: details.customerName || "Customer",
-    total: details.total || 0
+    total: details.total || 0,
+    url: `/?orderId=${encodeURIComponent(orderId)}&tab=orders`
   });
 
   return {
@@ -501,32 +613,58 @@ export async function dispatchNewOrderAlarm(
 }
 
 /**
- * Endpoint to trigger test alarm without creating any fake order
+ * Dedicated TEST NOTIFICATION endpoint requested by user:
+ * Title: 🚨 Zypsomart Test Notification
+ * Body: FCM is working correctly.
+ * Can be sent immediately or with a delay (e.g. 5 seconds) so user can close the app / lock screen first!
  */
-export async function testAlarmController(req: Request, res: Response) {
+export async function testNotificationController(req: Request, res: Response) {
   try {
-    const testOrderId = `TEST-${Date.now().toString().slice(-4)}`;
-    const testPayload = {
-      orderId: testOrderId,
-      customerName: "Rahul Sharma (Test)",
-      total: 349,
-      isTest: true
+    const delaySeconds = Math.max(0, Math.min(30, Number(req.body.delaySeconds || 0)));
+    const tokens = await getAllAdminTokens();
+
+    if (tokens.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "No registered admin devices found. Please click 'Enable Notifications' in the Admin App first."
+      });
+    }
+
+    const sendTestPush = async () => {
+      const fcmResult = await sendFCMPush(tokens, {
+        title: "🚨 Zypsomart Test Notification",
+        body: "FCM is working correctly.",
+        url: "/?tab=orders",
+        isTest: true
+      });
+      console.log(`[Test Notification] Dispatched test notification to ${tokens.length} device(s):`, fcmResult);
     };
 
-    const tokens = await getAllAdminTokens();
-    const fcmResult = await sendFCMPush(tokens, testPayload);
-
-    return res.json({
-      success: true,
-      message: "Test alarm triggered successfully on all registered devices via Firebase Admin SDK.",
-      testPayload,
-      deviceTokensCount: tokens.length,
-      fcmResult
-    });
+    if (delaySeconds > 0) {
+      // Execute after specified delay
+      setTimeout(sendTestPush, delaySeconds * 1000);
+      return res.json({
+        success: true,
+        delayed: true,
+        delaySeconds,
+        message: `Test notification scheduled! Close your app and lock your phone now. Notification will arrive in ${delaySeconds} seconds.`,
+        registeredDevices: tokens.length
+      });
+    } else {
+      await sendTestPush();
+      return res.json({
+        success: true,
+        message: "Test notification sent immediately to all registered devices.",
+        registeredDevices: tokens.length
+      });
+    }
   } catch (err: any) {
-    return res.status(500).json({ error: err?.message || "Failed to trigger test alarm" });
+    return res.status(500).json({ error: err?.message || "Failed to send test notification" });
   }
 }
+
+// Alias for backwards compatibility with server routes
+export const testAlarmController = testNotificationController;
 
 /**
  * Dispatch new order alarm endpoint (can be called from client or internal trigger)
@@ -547,15 +685,12 @@ export async function dispatchNewOrderAlarmController(req: Request, res: Respons
 }
 
 /**
- * Get alarm system status and registered device count
+ * Get alarm system status, registered device count, and service account status
  */
 export async function getAlarmStatusController(req: Request, res: Response) {
   try {
     const tokens = await getAllAdminTokens();
-    const hasServiceAccount =
-      !!process.env.FIREBASE_SERVICE_ACCOUNT ||
-      !!process.env.FIREBASE_SERVICE_ACCOUNT_KEY ||
-      !!process.env.GOOGLE_APPLICATION_CREDENTIALS;
+    const hasServiceAccount = hasAdminServiceAccountCredentials();
 
     return res.json({
       status: "active",
@@ -563,7 +698,8 @@ export async function getAlarmStatusController(req: Request, res: Response) {
       channel: "Zypsomart New Orders",
       channelId: "zypsomart_new_orders",
       sound: "new_order_alarm",
-      fcmConfigured: hasServiceAccount || getApps().length > 0,
+      serviceAccountConfigured: hasServiceAccount,
+      fcmConfigured: hasServiceAccount,
       registeredDevices: tokens.length,
       timestamp: new Date().toISOString()
     });

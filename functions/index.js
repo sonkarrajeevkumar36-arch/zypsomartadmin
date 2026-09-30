@@ -77,8 +77,8 @@ exports.onNewOrderAlarm = functions.firestore
     const message = {
       tokens: tokens,
       notification: {
-        title: "🚨 NEW ORDER",
-        body: `Order #${orderId} • ₹${total} from ${customerName} (${itemsCount} items)`
+        title: "🚨 NEW ZYPSOMART ORDER",
+        body: `New order received. Order ID: ${orderId} | Total: ₹${total}`
       },
       data: {
         orderId: String(orderId),
@@ -108,8 +108,8 @@ exports.onNewOrderAlarm = functions.firestore
           Urgency: "high"
         },
         notification: {
-          title: "🚨 NEW ORDER",
-          body: `Order #${orderId} • ₹${total} from ${customerName}`,
+          title: "🚨 NEW ZYPSOMART ORDER",
+          body: `New order received. Order ID: ${orderId} | Total: ₹${total}`,
           icon: "/pwa-192x192.png",
           badge: "/favicon.png",
           tag: `new-order-${orderId}`,

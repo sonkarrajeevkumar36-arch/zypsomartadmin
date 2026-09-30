@@ -1,5 +1,6 @@
 import { getMessaging, getToken, onMessage, isSupported } from "firebase/messaging";
-import { app } from "../firebase";
+import { doc, setDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
+import { app, db, auth } from "../firebase";
 
 export interface FCMRegistrationResult {
   success: boolean;
@@ -113,7 +114,6 @@ export async function registerDeviceForNotifications(adminEmail?: string): Promi
       token = await getToken(messaging, tokenOptions);
     } catch (tokenErr: any) {
       console.warn("[FCM] getToken notice:", tokenErr?.message || tokenErr);
-      // Even without Web Push VAPID key configured, local in-app real-time alarms function
       return {
         success: true,
         error: "VAPID key pending in Firebase settings. In-app siren & realtime alarms active."
@@ -121,16 +121,39 @@ export async function registerDeviceForNotifications(adminEmail?: string): Promi
     }
 
     if (token) {
-      // 4. Save device token on server backend
+      // 4. Save device token in localStorage
       localStorage.setItem("zypsomart_fcm_token", token);
       const deviceInfo = detectDeviceInfo();
+      const currentEmail = adminEmail || auth.currentUser?.email || "admin@zypsomart.com";
 
+      // 5. Direct write to Firestore admin_device_tokens using authenticated client SDK
+      try {
+        const docId = btoa(token).replace(/[+/=]/g, "_").substring(0, 80);
+        await setDoc(
+          doc(db, "admin_device_tokens", docId),
+          {
+            token,
+            adminEmail: currentEmail,
+            loggedIn: true,
+            enabled: true,
+            ...deviceInfo,
+            userAgent: navigator.userAgent,
+            updatedAt: serverTimestamp()
+          },
+          { merge: true }
+        );
+        console.log("[FCM] Registered device token in Firestore admin_device_tokens successfully.");
+      } catch (fsErr) {
+        console.warn("[FCM] Firestore token write notice:", fsErr);
+      }
+
+      // 6. Also sync with server backend endpoint
       await fetch("/api/admin/fcm-token", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           token,
-          adminEmail: adminEmail || "admin@zypsomart.com",
+          adminEmail: currentEmail,
           loggedIn: true,
           ...deviceInfo,
           userAgent: navigator.userAgent
@@ -155,6 +178,13 @@ export async function unregisterDeviceToken() {
   if (!token) return;
 
   try {
+    // 1. Direct delete from Firestore if authenticated
+    try {
+      const docId = btoa(token).replace(/[+/=]/g, "_").substring(0, 80);
+      await deleteDoc(doc(db, "admin_device_tokens", docId));
+    } catch {}
+
+    // 2. Also unregister on server
     await fetch("/api/admin/fcm-token", {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
@@ -164,6 +194,20 @@ export async function unregisterDeviceToken() {
   } catch (err) {
     console.warn("[FCM] Token unregister error:", err);
   }
+}
+
+/**
+ * Trigger Test Notification:
+ * Title: 🚨 Zypsomart Test Notification
+ * Body: FCM is working correctly.
+ */
+export async function triggerTestPushNotification(delaySeconds: number = 0) {
+  const response = await fetch("/api/admin/test-notification", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ delaySeconds })
+  });
+  return response.json();
 }
 
 /**

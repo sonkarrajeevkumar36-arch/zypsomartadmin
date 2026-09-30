@@ -18,15 +18,15 @@ const messaging = firebase.messaging();
 messaging.onBackgroundMessage((payload) => {
   console.log('[firebase-messaging-sw.js] Received background push message:', payload);
   const data = payload.data || {};
-  const notificationTitle = "🚨 NEW ORDER";
+  const notificationTitle = payload.notification?.title || data.title || "🚨 NEW ZYPSOMART ORDER";
   const orderId = data.orderId || "";
   const customerName = data.customerName || "Customer";
   const total = data.total ? `₹${data.total}` : "";
 
   const bodyText = payload.notification?.body || data.body || 
-    `Order #${orderId} • ${customerName} • ${total}`;
+    (orderId ? `New order received. Order ID: ${orderId} | Total: ${total}` : "New notification received.");
 
-  const targetUrl = data.url || `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
+  const targetUrl = data.url || (orderId ? `/?orderId=${encodeURIComponent(orderId)}&tab=orders` : "/?tab=orders");
 
   const notificationOptions = {
     body: bodyText,
@@ -61,13 +61,14 @@ self.addEventListener('push', (event) => {
     const notification = raw.notification || {};
     const data = raw.data || raw;
 
-    const title = "🚨 NEW ORDER";
+    const title = notification.title || data.title || "🚨 NEW ZYPSOMART ORDER";
     const orderId = data.orderId || "";
     const customer = data.customerName || "Customer";
     const total = data.total ? `₹${data.total}` : "";
-    const targetUrl = data.url || `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
+    const targetUrl = data.url || (orderId ? `/?orderId=${encodeURIComponent(orderId)}&tab=orders` : "/?tab=orders");
 
-    const body = notification.body || data.body || `Order #${orderId} • ${customer} • ${total}`;
+    const body = notification.body || data.body || 
+      (orderId ? `New order received. Order ID: ${orderId} | Total: ${total}` : "New notification received.");
 
     const options = {
       body: body,

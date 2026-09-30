@@ -42,6 +42,8 @@ import {
   AlertTriangle,
   Smartphone,
   Laptop,
+  Radio,
+  Clock,
   X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -54,7 +56,8 @@ import {
   unregisterDeviceToken,
   isNotificationSupported,
   getNotificationPermission,
-  onForegroundMessageListener
+  onForegroundMessageListener,
+  triggerTestPushNotification
 } from "./services/fcm";
 
 const FALLBACK_IMAGE =
@@ -426,6 +429,42 @@ function AdminDashboard() {
     })()
   );
 
+  // Acknowledged Order IDs for Home Page Badge & Unacknowledged Alerts
+  const [acknowledgedOrderIds, setAcknowledgedOrderIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const stored = localStorage.getItem("zypsomart_acknowledged_orders_v1");
+      return stored ? new Set(JSON.parse(stored)) : new Set();
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  const saveAcknowledgedOrderIds = (newSet: Set<string>) => {
+    setAcknowledgedOrderIds(newSet);
+    try {
+      localStorage.setItem("zypsomart_acknowledged_orders_v1", JSON.stringify(Array.from(newSet)));
+    } catch {}
+  };
+
+  const handleAcknowledgeOrder = (orderId: string) => {
+    const next = new Set<string>(acknowledgedOrderIds);
+    next.add(orderId);
+    saveAcknowledgedOrderIds(next);
+  };
+
+  const handleAcknowledgeAll = () => {
+    const next = new Set<string>(acknowledgedOrderIds);
+    orders.forEach((o) => next.add(o.id));
+    saveAcknowledgedOrderIds(next);
+    showNotification("success", "All new order alerts acknowledged.");
+  };
+
+  // Test Notification state
+  const [isSendingTestPush, setIsSendingTestPush] = useState(false);
+  const [testNotificationCountdown, setTestNotificationCountdown] = useState<number | null>(null);
+  const [testPushResult, setTestPushResult] = useState<{ success: boolean; message: string } | null>(null);
+
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallBtn, setShowInstallBtn] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
@@ -709,6 +748,7 @@ function AdminDashboard() {
     alarmAudio.stopAlarm();
     setIsAlarmRinging(false);
     setNewOrderAlert(null);
+    handleAcknowledgeOrder(orderId);
     if (orderId.startsWith("TEST-")) {
       showNotification("success", "Test Order Accepted! Alarm stopped.");
       return;
@@ -726,6 +766,7 @@ function AdminDashboard() {
     alarmAudio.stopAlarm();
     setIsAlarmRinging(false);
     setNewOrderAlert(null);
+    handleAcknowledgeOrder(orderId);
     setActiveTab("orders");
     setStatusFilter("all");
     setSearchQuery(orderId.startsWith("TEST-") ? "" : orderId);
@@ -736,9 +777,64 @@ function AdminDashboard() {
   };
 
   const handleDismissAlert = () => {
+    if (newOrderAlert) {
+      handleAcknowledgeOrder(newOrderAlert.id);
+    }
     alarmAudio.stopAlarm();
     setIsAlarmRinging(false);
     setNewOrderAlert(null);
+  };
+
+  // Calculate unacknowledged new orders: pending or new orders not yet acknowledged
+  const unacknowledgedOrders = useMemo(() => {
+    return orders.filter((o) => {
+      const isPending = o.status === "pending" || !o.status;
+      return isPending && !acknowledgedOrderIds.has(o.id);
+    });
+  }, [orders, acknowledgedOrderIds]);
+
+  // Handler for sending official FCM test notification (immediate or 5s delay for closed app)
+  const handleSendTestPush = async (delaySeconds: number = 0) => {
+    setIsSendingTestPush(true);
+    setTestPushResult(null);
+
+    if (delaySeconds > 0) {
+      let remaining = delaySeconds;
+      setTestNotificationCountdown(remaining);
+      const timer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(timer);
+          setTestNotificationCountdown(null);
+        } else {
+          setTestNotificationCountdown(remaining);
+        }
+      }, 1000);
+    }
+
+    try {
+      const res = await triggerTestPushNotification(delaySeconds);
+      if (res.success) {
+        setTestPushResult({
+          success: true,
+          message: res.message || "Test notification dispatched successfully."
+        });
+        showNotification("success", res.message || "Test push dispatched!");
+      } else {
+        setTestPushResult({
+          success: false,
+          message: res.error || "Failed to dispatch test notification."
+        });
+        showNotification("error", res.error || "Test push failed");
+      }
+    } catch (err: any) {
+      setTestPushResult({
+        success: false,
+        message: err.message || "Network error sending test notification."
+      });
+    } finally {
+      setIsSendingTestPush(false);
+    }
   };
 
   // Convert raw timestamp to milliseconds
@@ -1134,10 +1230,17 @@ function AdminDashboard() {
     }
 
     if (orderIdParam) {
+      setActiveTab("orders");
+      setStatusFilter("all");
       setSearchQuery(orderIdParam);
       // Clean query parameter from address bar cleanly without page refresh
-      const newUrl = window.location.pathname + (tabParam ? `?tab=${tabParam}` : "");
+      const newUrl = window.location.pathname + (tabParam ? `?tab=${tabParam}` : "?tab=orders");
       window.history.replaceState({}, document.title, newUrl);
+
+      setTimeout(() => {
+        const el = document.getElementById(`order-card-${orderIdParam}`);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 500);
     }
   }, [isPinVerified]);
 
@@ -1649,17 +1752,24 @@ function AdminDashboard() {
               <ShoppingCart size={19} />
               <span>Orders</span>
             </div>
-            {orders.length > 0 && (
-              <span
-                className={`text-xs font-bold px-2 py-0.5 rounded-full ${
-                  activeTab === "orders"
-                    ? "bg-white/25 text-white"
-                    : "bg-slate-100 text-slate-600"
-                }`}
-              >
-                {orders.length}
-              </span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {unacknowledgedOrders.length > 0 && (
+                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-red-500 text-white animate-pulse">
+                  {unacknowledgedOrders.length} NEW
+                </span>
+              )}
+              {orders.length > 0 && (
+                <span
+                  className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                    activeTab === "orders"
+                      ? "bg-white/25 text-white"
+                      : "bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {orders.length}
+                </span>
+              )}
+            </div>
           </button>
           <button
             onClick={() => setActiveTab("products")}
@@ -2471,6 +2581,77 @@ function AdminDashboard() {
                       )}
                     </div>
 
+                    {/* 3b. Dedicated FCM Test Push (Closed App & Realtime Verification) */}
+                    <div className="bg-sky-50 rounded-2xl p-4 border border-sky-200/80 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-black uppercase tracking-wider text-sky-900 flex items-center gap-1.5">
+                          <Radio size={16} className="text-sky-600" />
+                          <span>FCM Closed-App Push Test</span>
+                        </span>
+                        <span className="text-[10px] font-bold text-sky-700 bg-sky-100/90 px-2 py-0.5 rounded-md">
+                          FCM HTTP v1 • Zero Fake Orders
+                        </span>
+                      </div>
+
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Sends the test push notification to this device:
+                        <br />
+                        <span className="font-semibold text-slate-800">Title:</span> 🚨 Zypsomart Test Notification
+                        <br />
+                        <span className="font-semibold text-slate-800">Body:</span> FCM is working correctly.
+                      </p>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+                        <button
+                          disabled={isSendingTestPush}
+                          onClick={() => handleSendTestPush(0)}
+                          className="w-full bg-sky-600 hover:bg-sky-700 text-white font-black py-2.5 px-3 rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 text-xs uppercase tracking-wide disabled:opacity-50"
+                        >
+                          {isSendingTestPush && testNotificationCountdown === null ? (
+                            <RefreshCcw size={14} className="animate-spin" />
+                          ) : (
+                            <Bell size={14} />
+                          )}
+                          <span>⚡ Test Instant</span>
+                        </button>
+
+                        <button
+                          disabled={isSendingTestPush}
+                          onClick={() => handleSendTestPush(5)}
+                          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-black py-2.5 px-3 rounded-xl shadow-xs transition-all active:scale-95 cursor-pointer flex items-center justify-center gap-1.5 text-xs uppercase tracking-wide disabled:opacity-50"
+                        >
+                          {testNotificationCountdown !== null ? (
+                            <span className="animate-pulse text-amber-300 font-bold">
+                              ⏳ Close App! ({testNotificationCountdown}s)
+                            </span>
+                          ) : (
+                            <>
+                              <Clock size={14} />
+                              <span>⏱️ Test Closed (5s)</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+
+                      {testNotificationCountdown !== null && (
+                        <div className="p-3 bg-amber-100 border border-amber-300 rounded-xl text-amber-900 text-xs font-semibold animate-pulse text-center">
+                          🚀 Scheduled! Minimize or swipe away the app and lock your phone now! Arriving in {testNotificationCountdown} seconds...
+                        </div>
+                      )}
+
+                      {testPushResult && (
+                        <div
+                          className={`p-2.5 rounded-xl text-xs font-semibold border ${
+                            testPushResult.success
+                              ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                              : "bg-red-50 text-red-800 border-red-200"
+                          }`}
+                        >
+                          {testPushResult.message}
+                        </div>
+                      )}
+                    </div>
+
                     {/* 4. Audio Engine Test */}
                     <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 flex items-center justify-between">
                       <div>
@@ -2512,6 +2693,47 @@ function AdminDashboard() {
           ) : activeTab === "orders" ? (
             /* TAB 1: ORDERS DASHBOARD */
             <div className="space-y-6 pb-24">
+              {/* Unacknowledged New Orders Alert Banner */}
+              {unacknowledgedOrders.length > 0 && (
+                <div className="bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-red-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-red-400/30">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-12 h-12 bg-white/20 backdrop-blur-xs rounded-2xl flex items-center justify-center text-2xl shrink-0 shadow-inner">
+                      🚨
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-black text-base tracking-tight leading-tight">
+                          {unacknowledgedOrders.length} New Order{unacknowledgedOrders.length === 1 ? "" : "s"} Received
+                        </h4>
+                        <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-white text-red-700 rounded-full animate-pulse">
+                          Unacknowledged
+                        </span>
+                      </div>
+                      <p className="text-xs text-white/90 mt-0.5">
+                        New orders detected while app was closed or in background. Review and acknowledge to stop pending status.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => {
+                        setStatusFilter("pending");
+                        setSearchQuery("");
+                      }}
+                      className="px-4 py-2 bg-white text-red-700 hover:bg-slate-100 font-black text-xs rounded-xl shadow-xs transition-all cursor-pointer"
+                    >
+                      View Pending ({unacknowledgedOrders.length})
+                    </button>
+                    <button
+                      onClick={handleAcknowledgeAll}
+                      className="px-3.5 py-2 bg-black/25 hover:bg-black/35 text-white font-bold text-xs rounded-xl transition-all cursor-pointer border border-white/20"
+                    >
+                      Acknowledge All
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Stat Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
@@ -3172,10 +3394,17 @@ function AdminDashboard() {
               : "text-slate-500 hover:text-slate-800 font-medium"
           }`}
         >
-          <ShoppingCart
-            size={20}
-            className={activeTab === "orders" ? "stroke-[2.5px]" : "stroke-2"}
-          />
+          <div className="relative">
+            <ShoppingCart
+              size={20}
+              className={activeTab === "orders" ? "stroke-[2.5px]" : "stroke-2"}
+            />
+            {unacknowledgedOrders.length > 0 && (
+              <span className="absolute -top-1.5 -right-2 bg-red-600 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center animate-bounce shadow-xs">
+                {unacknowledgedOrders.length}
+              </span>
+            )}
+          </div>
           <span className="text-[10px] mt-1">Orders</span>
         </button>
 

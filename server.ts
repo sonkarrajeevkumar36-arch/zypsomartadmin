@@ -12,7 +12,9 @@ import {
   unregisterDeviceTokenController,
   testAlarmController,
   dispatchNewOrderAlarmController,
-  getAlarmStatusController
+  getAlarmStatusController,
+  testNotificationController,
+  configureServiceAccountController
 } from "./server/fcmController.js";
 import { startServerOrderWatcher } from "./server/orderWatcher.js";
 
@@ -55,6 +57,8 @@ async function startServer() {
   app.post("/api/admin/fcm-token", registerDeviceTokenController);
   app.delete("/api/admin/fcm-token", unregisterDeviceTokenController);
   app.post("/api/admin/test-alarm", testAlarmController);
+  app.post("/api/admin/test-notification", testNotificationController);
+  app.post("/api/admin/service-account", configureServiceAccountController);
   app.post("/api/admin/dispatch-alarm", dispatchNewOrderAlarmController);
   app.get("/api/admin/alarm-status", getAlarmStatusController);
 
