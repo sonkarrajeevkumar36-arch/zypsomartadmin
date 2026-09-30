@@ -121,6 +121,56 @@ export const isReturnOrder = (order: Order): boolean => {
   );
 };
 
+// 12-Hour PIN Security Verification Configuration
+const PIN_VERIFICATION_DURATION = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
+
+function getPinVerificationKey(userId: string): string {
+  return `zypsomart_pin_verified_${userId}`;
+}
+
+function checkIsPinVerified(userId: string): boolean {
+  if (typeof window === "undefined" || !userId) return false;
+  try {
+    const raw = localStorage.getItem(getPinVerificationKey(userId));
+    if (!raw) return false;
+    const data = JSON.parse(raw);
+    if (!data || typeof data.verifiedAt !== "number") return false;
+    const elapsed = Date.now() - data.verifiedAt;
+    return elapsed >= 0 && elapsed < PIN_VERIFICATION_DURATION;
+  } catch {
+    return false;
+  }
+}
+
+function savePinVerification(userId: string): void {
+  if (typeof window === "undefined" || !userId) return;
+  try {
+    const record = {
+      verifiedAt: Date.now(),
+      vToken: btoa(`${userId}:${Date.now()}`)
+    };
+    localStorage.setItem(getPinVerificationKey(userId), JSON.stringify(record));
+  } catch (e) {
+    console.warn("Could not save PIN verification to localStorage:", e);
+  }
+}
+
+function clearPinVerification(userId?: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (userId) {
+      localStorage.removeItem(getPinVerificationKey(userId));
+    } else {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith("zypsomart_pin_verified_")) {
+          localStorage.removeItem(key);
+        }
+      }
+    }
+  } catch {}
+}
+
 // Parse Firestore raw order document into typed Order
 const parseOrderDoc = (id: string, data: any): Order => {
   const customerName =
@@ -761,10 +811,13 @@ function AdminDashboard() {
       }
 
       if (currentUser) {
+        const isVerified = checkIsPinVerified(currentUser.uid);
+        setIsPinVerified(isVerified);
         unsubsOrders = startOrdersSync();
         unsubsProducts = loadProducts();
         unsubsCategories = loadCategories();
       } else {
+        setIsPinVerified(false);
         setLoading(false);
       }
     });
@@ -1021,12 +1074,72 @@ function AdminDashboard() {
   const handlePinSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (pin === "6823") {
+      if (user) {
+        savePinVerification(user.uid);
+      }
       setIsPinVerified(true);
+      setPin("");
       setPinError("");
     } else {
       setPinError("Invalid PIN. Please try again.");
     }
   };
+
+  // Unified Sign Out with PIN verification clearance & FCM unregister
+  const handleSignOut = async () => {
+    if (window.confirm("Do you want to sign out from Zypso Mart Admin?")) {
+      if (user) {
+        clearPinVerification(user.uid);
+      }
+      setIsPinVerified(false);
+      setPin("");
+      alarmAudio.stopAlarm();
+      setIsAlarmRinging(false);
+      await unregisterDeviceToken().catch(() => {});
+      await signOut(auth);
+    }
+  };
+
+  // 12-Hour PIN Expiration Monitor: re-prompts for PIN after 12 hours
+  useEffect(() => {
+    if (!user || !isPinVerified) return;
+
+    const checkPinExpiration = () => {
+      if (!checkIsPinVerified(user.uid)) {
+        console.log("[Security] 12-hour PIN verification window expired. Prompting PIN verification.");
+        setIsPinVerified(false);
+      }
+    };
+
+    const interval = setInterval(checkPinExpiration, 30000); // Check every 30s
+    window.addEventListener("focus", checkPinExpiration);
+    window.addEventListener("visibilitychange", checkPinExpiration);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", checkPinExpiration);
+      window.removeEventListener("visibilitychange", checkPinExpiration);
+    };
+  }, [user, isPinVerified]);
+
+  // Deep-link handler: when clicking closed-app FCM push notification with ?orderId=...&tab=orders
+  useEffect(() => {
+    if (!isPinVerified) return;
+    const params = new URLSearchParams(window.location.search);
+    const orderIdParam = params.get("orderId");
+    const tabParam = params.get("tab");
+
+    if (tabParam && ["orders", "products", "settings"].includes(tabParam)) {
+      setActiveTab(tabParam as any);
+    }
+
+    if (orderIdParam) {
+      setSearchQuery(orderIdParam);
+      // Clean query parameter from address bar cleanly without page refresh
+      const newUrl = window.location.pathname + (tabParam ? `?tab=${tabParam}` : "");
+      window.history.replaceState({}, document.title, newUrl);
+    }
+  }, [isPinVerified]);
 
   /**
    * Status Transition Handler:
@@ -1489,7 +1602,7 @@ function AdminDashboard() {
 
           <div className="mt-6">
             <button
-              onClick={() => signOut(auth)}
+              onClick={handleSignOut}
               className="hidden text-slate-400 hover:text-slate-600 text-sm font-medium transition-colors cursor-pointer"
               style={{ display: "none" }}
             >
@@ -1647,11 +1760,7 @@ function AdminDashboard() {
           </div>
 
           <button
-            onClick={() => {
-              setIsPinVerified(false);
-              setPin("");
-              signOut(auth);
-            }}
+            onClick={handleSignOut}
             className="flex items-center gap-3 w-full px-4 py-3 text-red-600 hover:bg-red-50 rounded-xl font-medium transition-colors cursor-pointer"
           >
             <LogOut size={20} />
@@ -3121,13 +3230,7 @@ function AdminDashboard() {
         )}
 
         <button
-          onClick={async () => {
-            if (window.confirm("Do you want to sign out?")) {
-              setIsPinVerified(false);
-              setPin("");
-              await signOut(auth);
-            }
-          }}
+          onClick={handleSignOut}
           className="flex flex-col items-center justify-center flex-1 py-1 min-h-[48px] text-red-500 hover:text-red-700 transition-all cursor-pointer"
         >
           <LogOut size={20} className="stroke-2" />

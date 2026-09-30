@@ -14,17 +14,19 @@ firebase.initializeApp({
 
 const messaging = firebase.messaging();
 
-// Handle background messages
+// Handle background messages when app is in background or completely closed
 messaging.onBackgroundMessage((payload) => {
-  console.log('[firebase-messaging-sw.js] Received background message:', payload);
+  console.log('[firebase-messaging-sw.js] Received background push message:', payload);
   const data = payload.data || {};
-  const notificationTitle = payload.notification?.title || data.title || "🚨 NEW ZYPSOMART ORDER";
+  const notificationTitle = "🚨 NEW ORDER";
   const orderId = data.orderId || "";
   const customerName = data.customerName || "Customer";
   const total = data.total ? `₹${data.total}` : "";
 
   const bodyText = payload.notification?.body || data.body || 
     `Order #${orderId} • ${customerName} • ${total}`;
+
+  const targetUrl = data.url || `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
 
   const notificationOptions = {
     body: bodyText,
@@ -34,9 +36,9 @@ messaging.onBackgroundMessage((payload) => {
     renotify: true,
     requireInteraction: true,
     silent: false,
-    vibrate: [300, 150, 300, 150, 600],
+    vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
     data: {
-      url: data.url || `/?orderId=${orderId}&tab=orders`,
+      url: targetUrl,
       orderId: orderId,
       customerName: customerName,
       total: data.total
@@ -59,10 +61,11 @@ self.addEventListener('push', (event) => {
     const notification = raw.notification || {};
     const data = raw.data || raw;
 
-    const title = notification.title || data.title || "🚨 NEW ZYPSOMART ORDER";
+    const title = "🚨 NEW ORDER";
     const orderId = data.orderId || "";
     const customer = data.customerName || "Customer";
     const total = data.total ? `₹${data.total}` : "";
+    const targetUrl = data.url || `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
 
     const body = notification.body || data.body || `Order #${orderId} • ${customer} • ${total}`;
 
@@ -74,9 +77,9 @@ self.addEventListener('push', (event) => {
       renotify: true,
       requireInteraction: true,
       silent: false,
-      vibrate: [300, 150, 300, 150, 600],
+      vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
       data: {
-        url: data.url || `/?orderId=${orderId}&tab=orders`,
+        url: targetUrl,
         orderId: orderId,
         customerName: customer,
         total: data.total
@@ -91,13 +94,13 @@ self.addEventListener('push', (event) => {
   } catch (err) {
     console.warn('[firebase-messaging-sw.js] Push JSON parse fallback:', err);
     event.waitUntil(
-      self.registration.showNotification("🚨 NEW ZYPSOMART ORDER", {
+      self.registration.showNotification("🚨 NEW ORDER", {
         body: event.data.text() || "New order received! Open dashboard to view.",
         icon: '/pwa-192x192.png',
         badge: '/favicon.png',
         tag: 'new-order-alert',
         requireInteraction: true,
-        vibrate: [300, 150, 300, 150, 600]
+        vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500]
       })
     );
   }
@@ -140,7 +143,7 @@ function openOrFocusClient(urlToOpen) {
         return client.focus();
       }
     }
-    // Otherwise open a new window
+    // Otherwise open a new window when app was closed
     if (clients.openWindow) {
       return clients.openWindow(urlToOpen);
     }

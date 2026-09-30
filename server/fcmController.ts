@@ -8,7 +8,7 @@ const FIRESTORE_REST_BASE = `https://firestore.googleapis.com/v1/projects/${FIRE
 const FIREBASE_API_KEY = "AIzaSyDxztzPoCTCzckaEsvupHJOyCHEhAxr9DU";
 
 // In-memory cache of alerted order IDs for ultra-fast local duplicate protection
-const alertedOrderIdsCache = new Set<string>();
+export const alertedOrderIdsCache = new Set<string>();
 
 let adminApp: App | null = null;
 
@@ -16,7 +16,7 @@ let adminApp: App | null = null;
  * Initialize Firebase Admin SDK using Service Account credentials or Application Default Credentials.
  * This utilizes FCM HTTP v1 under the hood (no deprecated legacy server keys).
  */
-function getFirebaseAdmin(): App | null {
+export function getFirebaseAdmin(): App | null {
   const existingApps = getApps();
   if (existingApps.length > 0) {
     adminApp = existingApps[0]!;
@@ -35,7 +35,6 @@ function getFirebaseAdmin(): App | null {
       if (trimmed.startsWith("{")) {
         certObj = JSON.parse(trimmed);
       } else {
-        // Support base64-encoded service account JSON
         const decoded = Buffer.from(trimmed, "base64").toString("utf8");
         if (decoded.trim().startsWith("{")) {
           certObj = JSON.parse(decoded);
@@ -77,6 +76,7 @@ getFirebaseAdmin();
 /**
  * Register or update an admin device FCM token
  * Stored in Firestore collection: `admin_device_tokens`
+ * Only logged-in admin devices receive push alerts!
  */
 export async function registerDeviceTokenController(req: Request, res: Response) {
   try {
@@ -101,6 +101,7 @@ export async function registerDeviceTokenController(req: Request, res: Response)
             platform: platform || "Unknown",
             userAgent: (userAgent || "").substring(0, 200),
             enabled: true,
+            loggedIn: true,
             updatedAt: FieldValue.serverTimestamp()
           },
           { merge: true }
@@ -127,6 +128,7 @@ export async function registerDeviceTokenController(req: Request, res: Response)
       platform: { stringValue: platform || "Unknown" },
       userAgent: { stringValue: (userAgent || "").substring(0, 200) },
       enabled: { booleanValue: true },
+      loggedIn: { booleanValue: true },
       updatedAt: { timestampValue: new Date().toISOString() }
     };
 
@@ -152,7 +154,7 @@ export async function registerDeviceTokenController(req: Request, res: Response)
 }
 
 /**
- * Unregister device token
+ * Unregister device token when admin logs out
  */
 export async function unregisterDeviceTokenController(req: Request, res: Response) {
   try {
@@ -182,9 +184,9 @@ export async function unregisterDeviceTokenController(req: Request, res: Respons
 }
 
 /**
- * Helper to get all registered admin device tokens
+ * Helper to get all registered and logged-in admin device tokens
  */
-async function getAllAdminTokens(): Promise<string[]> {
+export async function getAllAdminTokens(): Promise<string[]> {
   const app = getFirebaseAdmin();
   // 1. Try Firebase Admin Firestore
   try {
@@ -197,7 +199,10 @@ async function getAllAdminTokens(): Promise<string[]> {
       const tokens: string[] = [];
       snapshot.forEach((doc) => {
         const data = doc.data();
-        if (data.token) tokens.push(data.token);
+        // Only send to logged-in devices
+        if (data.token && data.loggedIn !== false) {
+          tokens.push(data.token);
+        }
       });
       if (tokens.length > 0) return tokens;
     }
@@ -219,7 +224,8 @@ async function getAllAdminTokens(): Promise<string[]> {
       const fields = doc.fields || {};
       const token = fields.token?.stringValue;
       const enabled = fields.enabled?.booleanValue ?? true;
-      if (token && enabled) {
+      const loggedIn = fields.loggedIn?.booleanValue ?? true;
+      if (token && enabled && loggedIn) {
         tokens.push(token);
       }
     }
@@ -233,7 +239,7 @@ async function getAllAdminTokens(): Promise<string[]> {
 /**
  * Remove stale or invalid registration token from Firestore
  */
-async function removeStaleToken(token: string) {
+export async function removeStaleToken(token: string) {
   try {
     const docId = Buffer.from(token).toString("base64url").substring(0, 80);
     const app = getFirebaseAdmin();
@@ -251,7 +257,7 @@ async function removeStaleToken(token: string) {
 /**
  * Check if order was already alerted in Firestore `adminAlerts` collection
  */
-async function hasOrderBeenAlerted(orderId: string): Promise<boolean> {
+export async function hasOrderBeenAlerted(orderId: string): Promise<boolean> {
   if (alertedOrderIdsCache.has(orderId)) return true;
 
   const app = getFirebaseAdmin();
@@ -283,7 +289,7 @@ async function hasOrderBeenAlerted(orderId: string): Promise<boolean> {
 /**
  * Record alerted order in Firestore `adminAlerts` to prevent any duplicate notifications
  */
-async function recordOrderAlert(orderId: string, details: { customerName?: string; total?: number }) {
+export async function recordOrderAlert(orderId: string, details: { customerName?: string; total?: number }) {
   alertedOrderIdsCache.add(orderId);
 
   const app = getFirebaseAdmin();
@@ -324,9 +330,11 @@ async function recordOrderAlert(orderId: string, details: { customerName?: strin
 
 /**
  * Send FCM Push Notification via Firebase Admin SDK (FCM HTTP v1 Multicast).
- * No legacy server key is required.
+ * Android channel: "Zypsomart New Orders" (channelId: "zypsomart_new_orders")
+ * Notification title: "🚨 NEW ORDER"
+ * Custom sound: "new_order_alarm"
  */
-async function sendFCMPush(
+export async function sendFCMPush(
   tokens: string[],
   orderData: {
     orderId: string;
@@ -336,8 +344,9 @@ async function sendFCMPush(
   }
 ) {
   const isTest = !!orderData.isTest;
-  const title = isTest ? "🚨 [TEST ALARM] NEW ZYPSOMART ORDER" : "🚨 NEW ZYPSOMART ORDER";
+  const title = isTest ? "🚨 [TEST ALARM] NEW ORDER" : "🚨 NEW ORDER";
   const body = `Order #${orderData.orderId} • ₹${orderData.total} from ${orderData.customerName}`;
+  const targetUrl = `/?orderId=${encodeURIComponent(orderData.orderId)}&tab=orders`;
 
   console.log(`[FCM HTTP v1] Preparing dispatch to ${tokens.length} registered admin device(s) for Order #${orderData.orderId}`);
 
@@ -365,18 +374,23 @@ async function sendFCMPush(
         orderId: String(orderData.orderId),
         customerName: String(orderData.customerName),
         total: String(orderData.total),
-        url: `/?orderId=${orderData.orderId}&tab=orders`,
+        url: targetUrl,
         type: isTest ? "test_alarm" : "new_order_alarm",
         timestamp: String(Date.now())
       },
       android: {
         priority: "high",
+        ttl: 3600,
         notification: {
-          channelId: "new_order_alerts",
+          channelId: "zypsomart_new_orders",
           sound: "new_order_alarm",
           defaultSound: false,
           priority: "max",
-          visibility: "public"
+          visibility: "public",
+          defaultVibrateTimings: false,
+          vibrateTimingsMillis: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
+          clickAction: targetUrl,
+          tag: `new-order-${orderData.orderId}`
         }
       },
       webpush: {
@@ -391,9 +405,9 @@ async function sendFCMPush(
           tag: `new-order-${orderData.orderId}`,
           renotify: true,
           requireInteraction: true,
-          vibrate: [300, 150, 300, 150, 600],
+          vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
           data: {
-            url: `/?orderId=${orderData.orderId}&tab=orders`,
+            url: targetUrl,
             orderId: String(orderData.orderId),
             customerName: String(orderData.customerName),
             total: String(orderData.total)
@@ -402,6 +416,9 @@ async function sendFCMPush(
             { action: "view", title: "👀 View Order" },
             { action: "accept", title: "✅ Accept Order" }
           ]
+        },
+        fcmOptions: {
+          link: targetUrl
         }
       }
     };
@@ -432,7 +449,6 @@ async function sendFCMPush(
     };
   } catch (err: any) {
     console.warn("[FCM HTTP v1] Firebase Admin messaging push dispatch notice:", err?.message || err);
-    // Real-time client Firestore subscription / Audio alarms continue uninterrupted
     return {
       success: true,
       count: tokens.length,
@@ -440,6 +456,48 @@ async function sendFCMPush(
       notice: err?.message || "Admin credentials not configured in local environment"
     };
   }
+}
+
+/**
+ * Unified dispatch handler for new order alarms
+ */
+export async function dispatchNewOrderAlarm(
+  orderId: string,
+  details: { customerName?: string; total?: number | string }
+) {
+  if (!orderId) {
+    return { skipped: true, reason: "Missing orderId" };
+  }
+
+  // 1. Strict duplicate check
+  const alreadyAlerted = await hasOrderBeenAlerted(orderId);
+  if (alreadyAlerted) {
+    return {
+      skipped: true,
+      reason: "Duplicate alert skipped. Order has already been alerted.",
+      orderId
+    };
+  }
+
+  // 2. Record alert in Firestore to prevent any future duplicate
+  await recordOrderAlert(orderId, {
+    customerName: details.customerName,
+    total: Number(details.total || 0)
+  });
+
+  // 3. Send FCM Push to all registered & logged-in admin devices via Firebase Admin SDK (HTTP v1)
+  const tokens = await getAllAdminTokens();
+  const result = await sendFCMPush(tokens, {
+    orderId,
+    customerName: details.customerName || "Customer",
+    total: details.total || 0
+  });
+
+  return {
+    success: true,
+    orderId,
+    devicesNotified: result.count
+  };
 }
 
 /**
@@ -471,7 +529,7 @@ export async function testAlarmController(req: Request, res: Response) {
 }
 
 /**
- * Dispatch new order alarm with strict duplicate protection
+ * Dispatch new order alarm endpoint (can be called from client or internal trigger)
  */
 export async function dispatchNewOrderAlarmController(req: Request, res: Response) {
   try {
@@ -480,32 +538,8 @@ export async function dispatchNewOrderAlarmController(req: Request, res: Respons
       return res.status(400).json({ error: "Missing orderId" });
     }
 
-    // 1. Strict duplicate check
-    const alreadyAlerted = await hasOrderBeenAlerted(orderId);
-    if (alreadyAlerted) {
-      return res.json({
-        skipped: true,
-        reason: "Duplicate alert skipped. Order has already been alerted.",
-        orderId
-      });
-    }
-
-    // 2. Record alert in Firestore to prevent any future duplicate
-    await recordOrderAlert(orderId, { customerName, total });
-
-    // 3. Send FCM Push to all registered devices via Firebase Admin SDK (HTTP v1)
-    const tokens = await getAllAdminTokens();
-    const result = await sendFCMPush(tokens, {
-      orderId,
-      customerName: customerName || "Customer",
-      total: total || 0
-    });
-
-    return res.json({
-      success: true,
-      orderId,
-      devicesNotified: result.count
-    });
+    const result = await dispatchNewOrderAlarm(orderId, { customerName, total });
+    return res.json(result);
   } catch (err: any) {
     console.error("[FCM Backend] Dispatch error:", err);
     return res.status(500).json({ error: err?.message || "Failed to dispatch alarm" });
@@ -526,6 +560,9 @@ export async function getAlarmStatusController(req: Request, res: Response) {
     return res.json({
       status: "active",
       provider: "Firebase Admin SDK (FCM HTTP v1)",
+      channel: "Zypsomart New Orders",
+      channelId: "zypsomart_new_orders",
+      sound: "new_order_alarm",
       fcmConfigured: hasServiceAccount || getApps().length > 0,
       registeredDevices: tokens.length,
       timestamp: new Date().toISOString()

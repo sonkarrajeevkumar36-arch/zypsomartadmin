@@ -131,6 +131,7 @@ export async function registerDeviceForNotifications(adminEmail?: string): Promi
         body: JSON.stringify({
           token,
           adminEmail: adminEmail || "admin@zypsomart.com",
+          loggedIn: true,
           ...deviceInfo,
           userAgent: navigator.userAgent
         })

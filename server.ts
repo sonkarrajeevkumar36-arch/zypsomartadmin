@@ -14,6 +14,7 @@ import {
   dispatchNewOrderAlarmController,
   getAlarmStatusController
 } from "./server/fcmController.js";
+import { startServerOrderWatcher } from "./server/orderWatcher.js";
 
 async function startServer() {
   const app = express();
@@ -79,6 +80,10 @@ async function startServer() {
 
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
+    // Start 24/7 background order watcher for closed-app alarm notifications
+    startServerOrderWatcher().catch((err) => {
+      console.warn("[Order Watcher] Startup warning:", err);
+    });
   });
 }
 

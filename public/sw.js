@@ -111,10 +111,11 @@ self.addEventListener('push', (event) => {
     const notification = raw.notification || {};
     const data = raw.data || raw;
 
-    const title = notification.title || data.title || "🚨 NEW ZYPSOMART ORDER";
+    const title = "🚨 NEW ORDER";
     const orderId = data.orderId || "";
     const customer = data.customerName || "Customer";
     const total = data.total ? `₹${data.total}` : "";
+    const targetUrl = data.url || `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
 
     const body = notification.body || data.body || `Order #${orderId} • ${customer} • ${total}`;
 
@@ -126,9 +127,9 @@ self.addEventListener('push', (event) => {
       renotify: true,
       requireInteraction: true,
       silent: false,
-      vibrate: [300, 150, 300, 150, 600],
+      vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
       data: {
-        url: data.url || `/?orderId=${orderId}&tab=orders`,
+        url: targetUrl,
         orderId: orderId,
         customerName: customer,
         total: data.total
@@ -142,13 +143,13 @@ self.addEventListener('push', (event) => {
     event.waitUntil(self.registration.showNotification(title, options));
   } catch (err) {
     event.waitUntil(
-      self.registration.showNotification("🚨 NEW ZYPSOMART ORDER", {
+      self.registration.showNotification("🚨 NEW ORDER", {
         body: event.data.text() || "New order received! Open dashboard to view.",
         icon: '/pwa-192x192.png',
         badge: '/favicon.png',
         tag: 'new-order-alert',
         requireInteraction: true,
-        vibrate: [300, 150, 300, 150, 600]
+        vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500]
       })
     );
   }

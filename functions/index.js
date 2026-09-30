@@ -10,6 +10,7 @@ const db = admin.firestore();
 /**
  * Trigger: Firestore onCreate for new documents in 'orders' collection
  * Flow: New Order → Firestore → Cloud Function → FCM → Admin Mobile + Laptop
+ * Works when Admin App is OPEN, IN BACKGROUND, or COMPLETELY CLOSED!
  */
 exports.onNewOrderAlarm = functions.firestore
   .document("orders/{orderId}")
@@ -27,11 +28,13 @@ exports.onNewOrderAlarm = functions.firestore
       return null;
     }
 
-    const customerName = orderData.customerName || orderData.name || "Customer";
-    const total = orderData.total || 0;
+    const customerName =
+      orderData.customerName || orderData.name || orderData.customer?.name || "Customer";
+    const total = orderData.total || orderData.orderTotal || 0;
     const itemsCount = Array.isArray(orderData.items) ? orderData.items.length : 1;
+    const targetUrl = `/?orderId=${encodeURIComponent(orderId)}&tab=orders`;
 
-    // 2. FETCH ALL REGISTERED ADMIN DEVICE TOKENS (Mobile + Laptop)
+    // 2. FETCH ALL REGISTERED & LOGGED-IN ADMIN DEVICE TOKENS (Mobile + Laptop)
     const tokensSnapshot = await db
       .collection("admin_device_tokens")
       .where("enabled", "==", true)
@@ -54,35 +57,50 @@ exports.onNewOrderAlarm = functions.firestore
     const tokens = [];
     tokensSnapshot.forEach((doc) => {
       const data = doc.data();
-      if (data.token) tokens.push(data.token);
+      // Only send to logged-in admin devices
+      if (data.token && data.loggedIn !== false) {
+        tokens.push(data.token);
+      }
     });
 
-    console.log(`[Cloud Function] Sending FCM push alert to ${tokens.length} admin device(s)`);
+    if (tokens.length === 0) {
+      console.log("[Cloud Function] No logged-in admin device tokens found.");
+      return null;
+    }
+
+    console.log(`[Cloud Function] Sending FCM push alert to ${tokens.length} logged-in admin device(s)`);
 
     // 3. BUILD FCM HIGH-PRIORITY MULTICAST PAYLOAD
+    // High-priority Android notification channel: "Zypsomart New Orders" (channelId: "zypsomart_new_orders")
+    // Custom sound: "new_order_alarm"
+    // Notification Title: "🚨 NEW ORDER"
     const message = {
       tokens: tokens,
       notification: {
-        title: "🚨 NEW ZYPSOMART ORDER",
+        title: "🚨 NEW ORDER",
         body: `Order #${orderId} • ₹${total} from ${customerName} (${itemsCount} items)`
       },
       data: {
         orderId: String(orderId),
         customerName: String(customerName),
         total: String(total),
-        url: `/?orderId=${orderId}&tab=orders`,
+        url: targetUrl,
         type: "new_order_alarm",
         timestamp: String(Date.now())
       },
       android: {
         priority: "high",
+        ttl: 3600,
         notification: {
-          channelId: "new_order_alerts",
+          channelId: "zypsomart_new_orders",
           sound: "new_order_alarm",
           defaultSound: false,
-          priority: "high",
-          notificationPriority: "priority_max",
-          visibility: "public"
+          priority: "max",
+          visibility: "public",
+          defaultVibrateTimings: false,
+          vibrateTimingsMillis: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
+          clickAction: targetUrl,
+          tag: `new-order-${orderId}`
         }
       },
       webpush: {
@@ -90,24 +108,28 @@ exports.onNewOrderAlarm = functions.firestore
           Urgency: "high"
         },
         notification: {
-          title: "🚨 NEW ZYPSOMART ORDER",
+          title: "🚨 NEW ORDER",
           body: `Order #${orderId} • ₹${total} from ${customerName}`,
           icon: "/pwa-192x192.png",
           badge: "/favicon.png",
           tag: `new-order-${orderId}`,
           renotify: true,
           requireInteraction: true,
-          vibrate: [300, 150, 300, 150, 600],
+          vibrate: [500, 200, 500, 200, 1000, 200, 500, 200, 500],
           data: {
-            url: `/?orderId=${orderId}&tab=orders`,
-            orderId: orderId,
-            customerName: customerName,
-            total: total
+            url: targetUrl,
+            orderId: String(orderId),
+            customerName: String(customerName),
+            total: String(total),
+            type: "new_order_alarm"
           },
           actions: [
             { action: "view", title: "👀 View Order" },
             { action: "accept", title: "✅ Accept Order" }
           ]
+        },
+        fcmOptions: {
+          link: targetUrl
         }
       }
     };
@@ -144,7 +166,7 @@ exports.onNewOrderAlarm = functions.firestore
         }
       }
 
-      // 5. RECORD PROCESSED ALERT
+      // 5. RECORD PROCESSED ALERT IN adminAlerts (DUPLICATE PREVENTION)
       await alertRef.set({
         orderId,
         customerName,
