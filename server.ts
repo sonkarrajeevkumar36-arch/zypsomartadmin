@@ -5,8 +5,13 @@ import { createServer as createViteServer } from "vite";
 import {
   updateOrderStatusController,
   getOrderController,
-  listOrdersController
+  listOrdersController,
+  deleteOrderController
 } from "./server/orderController.js";
+import {
+  getShopStatusController,
+  updateShopStatusController
+} from "./server/shopController.js";
 import {
   registerDeviceTokenController,
   unregisterDeviceTokenController,
@@ -44,10 +49,16 @@ async function startServer() {
     });
   });
 
+  // Shop Open / Closed Status API (for Admin & Customer Apps)
+  app.get("/api/shop/status", getShopStatusController);
+  app.post("/api/shop/status", updateShopStatusController);
+  app.put("/api/shop/status", updateShopStatusController);
+
   // Order status transition API endpoints with validation
   app.post("/api/orders/:id/status", updateOrderStatusController);
   app.patch("/api/orders/:id/status", updateOrderStatusController);
   app.post("/api/orders/status", updateOrderStatusController);
+  app.delete("/api/orders/:id", deleteOrderController);
 
   // Order query endpoints
   app.get("/api/orders/:id", getOrderController);

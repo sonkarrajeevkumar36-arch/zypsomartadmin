@@ -13,6 +13,7 @@ import {
   onSnapshot,
   updateDoc,
   deleteDoc,
+  setDoc,
   addDoc,
   query,
   orderBy,
@@ -477,6 +478,14 @@ function AdminDashboard() {
       localStorage.getItem("zypsomart_pwa_installed") === "true";
     return Boolean(isStandalone);
   });
+
+  // Shop Open / Closed states (Central Firestore doc: shopSettings/store)
+  const [isShopOpen, setIsShopOpen] = useState<boolean>(true);
+  const [isUpdatingShopStatus, setIsUpdatingShopStatus] = useState<boolean>(false);
+
+  // Order Deletion states (Feature 1: Delete test/fake orders permanently)
+  const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
+  const [isDeletingOrder, setIsDeletingOrder] = useState<boolean>(false);
 
   // Filter & Search states
   const [statusFilter, setStatusFilter] = useState("all");
@@ -1244,6 +1253,110 @@ function AdminDashboard() {
     }
   }, [isPinVerified]);
 
+  // Real-time listener for central Shop Status (shopSettings/store)
+  useEffect(() => {
+    try {
+      const shopDocRef = doc(db, "shopSettings", "store");
+      const unsub = onSnapshot(
+        shopDocRef,
+        (snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            if (data && typeof data.isOpen === "boolean") {
+              setIsShopOpen(data.isOpen);
+            }
+          }
+        },
+        (err) => {
+          console.warn("[Shop Status] Real-time listener notice:", err?.message || err);
+        }
+      );
+      return () => unsub();
+    } catch (e) {
+      console.warn("[Shop Status] Setup notice:", e);
+    }
+  }, []);
+
+  // Handler: Toggle Shop Open / Closed Status
+  const handleUpdateShopStatus = async (nextIsOpen: boolean) => {
+    setIsUpdatingShopStatus(true);
+    try {
+      // 1. Optimistic update
+      setIsShopOpen(nextIsOpen);
+
+      // 2. Direct write to central Firestore document: shopSettings/store
+      const shopDocRef = doc(db, "shopSettings", "store");
+      await setDoc(
+        shopDocRef,
+        {
+          isOpen: nextIsOpen,
+          updatedAt: new Date(),
+          updatedBy: user?.email || "admin@zypsomart.com"
+        },
+        { merge: true }
+      );
+
+      // 3. Sync to backend API endpoint
+      await fetch("/api/shop/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          isOpen: nextIsOpen,
+          updatedBy: user?.email || "admin@zypsomart.com"
+        })
+      }).catch(() => {});
+
+      showNotification(
+        "success",
+        nextIsOpen
+          ? "Shop is now OPEN 🟢 Customers can place orders."
+          : "Shop is now CLOSED 🔴 Customer app shows closed & orders disabled."
+      );
+    } catch (err: any) {
+      console.error("[Shop Status] Error updating shop status:", err);
+      showNotification("error", "Failed to update shop status: " + (err.message || String(err)));
+      setIsShopOpen(!nextIsOpen);
+    } finally {
+      setIsUpdatingShopStatus(false);
+    }
+  };
+
+  // Handler: Permanently delete an order (Admin only)
+  const handleConfirmDeleteOrder = async () => {
+    if (!orderToDelete) return;
+    const orderId = orderToDelete.id;
+    setIsDeletingOrder(true);
+    try {
+      // 1. Optimistic removal from state
+      setOrders((prev) => prev.filter((o) => o.id !== orderId));
+      alertedOrderIdsRef.current.delete(orderId);
+      handleAcknowledgeOrder(orderId);
+
+      if (newOrderAlert?.id === orderId) {
+        alarmAudio.stopAlarm();
+        setIsAlarmRinging(false);
+        setNewOrderAlert(null);
+      }
+
+      // 2. Permanent deletion from Firestore
+      await deleteDoc(doc(db, "orders", orderId));
+
+      // 3. Backend server deletion
+      await fetch(`/api/orders/${encodeURIComponent(orderId)}`, {
+        method: "DELETE"
+      }).catch(() => {});
+
+      showNotification("success", `Order #${orderId.slice(-6).toUpperCase()} deleted permanently.`);
+      setOrderToDelete(null);
+    } catch (err: any) {
+      console.error("[Delete Order] Error deleting order:", err);
+      showNotification("error", "Failed to delete order: " + (err.message || String(err)));
+      startOrdersSync();
+    } finally {
+      setIsDeletingOrder(false);
+    }
+  };
+
   /**
    * Status Transition Handler:
    * 1. Calls the backend API endpoint (/api/orders/:id/status) which enforces transition validation.
@@ -1838,6 +1951,36 @@ function AdminDashboard() {
             </button>
           )}
 
+          {/* Store Open / Closed Status Control in Sidebar */}
+          <div className="p-3 mb-3 rounded-2xl bg-slate-50 border border-slate-200/80">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                Store Status
+              </span>
+              <span
+                className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
+                  isShopOpen
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-800 animate-pulse"
+                }`}
+              >
+                {isShopOpen ? "OPEN" : "CLOSED"}
+              </span>
+            </div>
+            <button
+              onClick={() => handleUpdateShopStatus(!isShopOpen)}
+              disabled={isUpdatingShopStatus}
+              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-xs ${
+                isShopOpen
+                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                  : "bg-red-600 hover:bg-red-700 text-white animate-pulse"
+              }`}
+              title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
+            >
+              <span>{isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}</span>
+            </button>
+          </div>
+
           <div className="px-4 py-3 mb-4 rounded-xl bg-slate-50 border border-slate-100 overflow-hidden space-y-2">
             <div>
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
@@ -1942,6 +2085,32 @@ function AdminDashboard() {
                 title="Refresh Content"
               >
                 <RefreshCcw size={17} className="text-slate-600" />
+              </button>
+
+              {/* Shop Open / Closed Toggle Button in Header */}
+              <button
+                onClick={() => handleUpdateShopStatus(!isShopOpen)}
+                disabled={isUpdatingShopStatus}
+                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer shadow-xs border ${
+                  isShopOpen
+                    ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                    : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200"
+                }`}
+                title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
+              >
+                <span
+                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                    isShopOpen
+                      ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
+                      : "bg-red-600 shadow-xs shadow-red-600/50 animate-pulse"
+                  }`}
+                />
+                <span className="hidden xs:inline sm:inline">
+                  {isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}
+                </span>
+                <span className="inline xs:hidden sm:hidden">
+                  {isShopOpen ? "OPEN" : "CLOSED"}
+                </span>
               </button>
 
               {/* Alarm Control & Status Button in Header */}
@@ -2427,6 +2596,71 @@ function AdminDashboard() {
             )}
           </AnimatePresence>
 
+          {/* Feature 1: Delete Order Confirmation Modal */}
+          <AnimatePresence>
+            {orderToDelete && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-4 shadow-sm">
+                    <Trash2 size={26} />
+                  </div>
+
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Delete this order permanently?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    This will permanently remove order{" "}
+                    <span className="font-mono font-bold text-slate-800">
+                      #{orderToDelete.id.slice(-6).toUpperCase()}
+                    </span>{" "}
+                    ({orderToDelete.customerName} • ₹{(orderToDelete.total || 0).toLocaleString()}) from Firestore.
+                    <br />
+                    <span className="text-red-600 font-semibold">This action cannot be undone.</span>
+                  </p>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      disabled={isDeletingOrder}
+                      onClick={() => setOrderToDelete(null)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDeletingOrder}
+                      onClick={handleConfirmDeleteOrder}
+                      className="py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs rounded-xl shadow-md shadow-red-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
+                    >
+                      {isDeletingOrder ? (
+                        <>
+                          <RefreshCcw size={14} className="animate-spin" />
+                          <span>Deleting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 size={14} />
+                          <span>Delete</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Admin Alarm & Notification Settings Modal */}
           <AnimatePresence>
             {showAlarmSettingsModal && (
@@ -2693,6 +2927,40 @@ function AdminDashboard() {
           ) : activeTab === "orders" ? (
             /* TAB 1: ORDERS DASHBOARD */
             <div className="space-y-6 pb-24">
+              {/* Feature 2: Shop Closed Alert Banner */}
+              {!isShopOpen && (
+                <div className="bg-gradient-to-r from-red-600 via-rose-600 to-red-700 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-red-600/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-red-500/50 animate-pulse">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-12 h-12 bg-white/20 backdrop-blur-xs rounded-2xl flex items-center justify-center text-2xl shrink-0 shadow-inner">
+                      🔴
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-black text-base tracking-tight leading-tight">
+                          SHOP IS CURRENTLY CLOSED
+                        </h4>
+                        <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-white text-red-700 rounded-full">
+                          Store Inactive
+                        </span>
+                      </div>
+                      <p className="text-xs text-white/90 mt-0.5">
+                        Customer App displays "🔴 SHOP CLOSED". Customers cannot place new orders until you reopen the shop.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => handleUpdateShopStatus(true)}
+                      disabled={isUpdatingShopStatus}
+                      className="px-4 py-2 bg-white text-emerald-800 hover:bg-emerald-50 font-black text-xs rounded-xl shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
+                    >
+                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                      <span>Switch to SHOP OPEN</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Unacknowledged New Orders Alert Banner */}
               {unacknowledgedOrders.length > 0 && (
                 <div className="bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-red-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-red-400/30">
@@ -2935,32 +3203,43 @@ function AdminDashboard() {
                               </p>
                             </div>
 
-                            {/* Badge */}
-                            <span
-                              className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shadow-sm ${
-                                currentStatus === "accepted"
-                                  ? "bg-emerald-100 text-emerald-800 border border-emerald-200/50"
-                                  : currentStatus === "delivered"
-                                  ? "bg-blue-100 text-blue-800 border border-blue-200/50"
-                                  : currentStatus === "cancelled"
-                                  ? "bg-red-100 text-red-800 border border-red-200/50"
-                                  : isReturn
-                                  ? isReturnApproved
+                            {/* Badge & Delete Button */}
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span
+                                className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shadow-sm ${
+                                  currentStatus === "accepted"
                                     ? "bg-emerald-100 text-emerald-800 border border-emerald-200/50"
+                                    : currentStatus === "delivered"
+                                    ? "bg-blue-100 text-blue-800 border border-blue-200/50"
+                                    : currentStatus === "cancelled"
+                                    ? "bg-red-100 text-red-800 border border-red-200/50"
+                                    : isReturn
+                                    ? isReturnApproved
+                                      ? "bg-emerald-100 text-emerald-800 border border-emerald-200/50"
+                                      : isReturnRejected
+                                      ? "bg-slate-200 text-slate-800 border border-slate-300"
+                                      : "bg-orange-100 text-orange-800 border border-orange-200/50"
+                                    : "bg-amber-100 text-amber-800 border border-amber-200/50"
+                                }`}
+                              >
+                                {isReturn
+                                  ? isReturnApproved
+                                    ? "RETURN APPROVED"
                                     : isReturnRejected
-                                    ? "bg-slate-200 text-slate-800 border border-slate-300"
-                                    : "bg-orange-100 text-orange-800 border border-orange-200/50"
-                                  : "bg-amber-100 text-amber-800 border border-amber-200/50"
-                              }`}
-                            >
-                              {isReturn
-                                ? isReturnApproved
-                                  ? "RETURN APPROVED"
-                                  : isReturnRejected
-                                  ? "RETURN REJECTED"
-                                  : "RETURN REQUEST"
-                                : order.status.toUpperCase()}
-                            </span>
+                                    ? "RETURN REJECTED"
+                                    : "RETURN REQUEST"
+                                  : order.status.toUpperCase()}
+                              </span>
+
+                              {/* Feature 1: Delete Order Button */}
+                              <button
+                                onClick={() => setOrderToDelete(order)}
+                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer shrink-0"
+                                title="Delete this order permanently"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
                           </div>
 
                           {/* Customer Information */}

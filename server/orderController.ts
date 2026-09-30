@@ -439,3 +439,38 @@ export async function listOrdersController(req: Request, res: Response): Promise
     res.status(500).json({ success: false, error: error.message });
   }
 }
+
+/**
+ * Controller: Delete an order permanently (Admin only)
+ */
+export async function deleteOrderController(req: Request, res: Response): Promise<void> {
+  const { id } = req.params;
+  if (!id) {
+    res.status(400).json({ success: false, error: "Missing order ID" });
+    return;
+  }
+
+  try {
+    const url = `${FIRESTORE_REST_BASE}/orders/${encodeURIComponent(id)}?key=${FIREBASE_API_KEY}`;
+    const headers: Record<string, string> = {};
+    if (req.headers.authorization) {
+      headers["Authorization"] = req.headers.authorization;
+    }
+
+    await fetch(url, {
+      method: "DELETE",
+      headers
+    });
+
+    console.log(`[OrderController] Order #${id} deleted by admin.`);
+
+    res.status(200).json({
+      success: true,
+      message: `Order #${id} deleted successfully.`,
+      orderId: id
+    });
+  } catch (error: any) {
+    console.error(`[OrderController] Error deleting order ${id}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
