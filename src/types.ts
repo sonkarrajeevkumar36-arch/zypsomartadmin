@@ -17,6 +17,8 @@ export interface Order {
   paymentMethod: string;
   notes?: string;
   customerNotes?: string;
+  internalNotes?: string;
+  adminNotes?: string;
   type?: string;
   returnStatus?: string;
   returnNotes?: string;

@@ -25,6 +25,7 @@ import {
   CircleCheckBig,
   CircleX,
   Download,
+  FileText,
   IndianRupee,
   LayoutDashboard,
   LogOut,
@@ -267,6 +268,8 @@ const parseOrderDoc = (id: string, data: any): Order => {
       data.paymentMethod || data.paymentType || data.paymentMode || "Cash on Delivery",
     notes,
     customerNotes: notes,
+    internalNotes: data.internalNotes || data.adminNotes || data.adminNote || "",
+    adminNotes: data.internalNotes || data.adminNotes || data.adminNote || "",
     type,
     returnStatus: data.returnStatus,
     returnNotes: data.returnNotes,
@@ -497,6 +500,10 @@ function AdminDashboard() {
   // Filter & Search states
   const [statusFilter, setStatusFilter] = useState("all");
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Internal Notes states
+  const [notesInput, setNotesInput] = useState<Record<string, string>>({});
+  const [savingNotes, setSavingNotes] = useState<Record<string, boolean>>({});
 
   // Product modal states
   const [showProductModal, setShowProductModal] = useState(false);
@@ -1518,6 +1525,58 @@ function AdminDashboard() {
       startOrdersSync();
     } finally {
       setUpdatingOrders((prev) => ({ ...prev, [orderId]: false }));
+    }
+  };
+
+  // Handler: Save internal admin note without changing order status
+  const handleSaveInternalNotes = async (orderId: string) => {
+    const rawNote = notesInput[orderId];
+    const order = orders.find((o) => o.id === orderId);
+    if (!order) return;
+    const noteToSave = rawNote !== undefined ? rawNote.trim() : (order.internalNotes || "").trim();
+
+    setSavingNotes((prev) => ({ ...prev, [orderId]: true }));
+    try {
+      // 1. Optimistic state update (strictly preserves existing order status!)
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? { ...o, internalNotes: noteToSave, adminNotes: noteToSave }
+            : o
+        )
+      );
+
+      // 2. Direct Firestore update (only updates internalNotes & adminNotes, order status is unchanged!)
+      const orderRef = doc(db, "orders", orderId);
+      await updateDoc(orderRef, {
+        internalNotes: noteToSave,
+        adminNotes: noteToSave,
+        updatedAt: new Date()
+      });
+
+      // 3. Backend endpoint sync (status is preserved)
+      try {
+        await fetch(`/api/orders/${encodeURIComponent(orderId)}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            internalNotes: noteToSave,
+            updatedBy: user?.email || "admin@zypsomart.com"
+          })
+        });
+      } catch {}
+
+      showNotification(
+        "success",
+        noteToSave
+          ? `Internal note attached to #${orderId.slice(-6).toUpperCase()}`
+          : `Internal note cleared for #${orderId.slice(-6).toUpperCase()}`
+      );
+    } catch (err: any) {
+      console.error("[Orders] Failed to save internal note:", err);
+      showNotification("error", "Failed to save note: " + (err.message || String(err)));
+    } finally {
+      setSavingNotes((prev) => ({ ...prev, [orderId]: false }));
     }
   };
 
@@ -3508,6 +3567,69 @@ function AdminDashboard() {
                                 </button>
                               </>
                             )}
+                          </div>
+
+                          {/* Internal Admin Note in Order Action Area */}
+                          <div className="mt-3 pt-2.5 border-t border-slate-100">
+                            <div className="flex items-center justify-between gap-2 mb-1.5">
+                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                                <FileText size={12} className="text-emerald-600 shrink-0" />
+                                <span>Internal Admin Note</span>
+                              </span>
+                              {order.internalNotes && (
+                                <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/50">
+                                  Saved Note
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                placeholder="Attach internal note (status will not change)..."
+                                value={
+                                  notesInput[order.id] !== undefined
+                                    ? notesInput[order.id]
+                                    : (order.internalNotes || "")
+                                }
+                                onChange={(e) =>
+                                  setNotesInput((prev) => ({
+                                    ...prev,
+                                    [order.id]: e.target.value
+                                  }))
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    handleSaveInternalNotes(order.id);
+                                  }
+                                }}
+                                className="flex-1 min-w-0 px-3 py-1.5 sm:py-2 text-xs bg-slate-50 focus:bg-white border border-slate-200 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 rounded-xl outline-none transition-all placeholder:text-slate-400 font-medium"
+                              />
+
+                              <button
+                                type="button"
+                                onClick={() => handleSaveInternalNotes(order.id)}
+                                disabled={
+                                  savingNotes[order.id] ||
+                                  (notesInput[order.id] !== undefined &&
+                                    notesInput[order.id].trim() === (order.internalNotes || "").trim())
+                                }
+                                className="px-3 py-1.5 sm:py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-100 text-white disabled:text-slate-400 font-black text-xs rounded-xl shadow-xs disabled:shadow-none transition-all cursor-pointer disabled:cursor-not-allowed shrink-0 flex items-center gap-1 active:scale-95"
+                                title="Attach note without changing order status"
+                              >
+                                {savingNotes[order.id] ? (
+                                  <>
+                                    <RefreshCcw size={12} className="animate-spin" />
+                                    <span>Saving</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Save size={12} />
+                                    <span>Save</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </motion.div>

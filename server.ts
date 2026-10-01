@@ -4,10 +4,10 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import {
   updateOrderStatusController,
+  updateOrderNotesController,
   getOrderController,
   listOrdersController,
-  deleteOrderController,
-  createOrderController
+  deleteOrderController
 } from "./server/orderController.js";
 import {
   getShopStatusController,
@@ -61,8 +61,9 @@ async function startServer() {
   app.post("/api/orders/status", updateOrderStatusController);
   app.delete("/api/orders/:id", deleteOrderController);
 
-  // Order creation endpoint (strictly checks shop open status)
-  app.post("/api/orders", createOrderController);
+  // Order internal notes API endpoints (status is preserved)
+  app.post("/api/orders/:id/notes", updateOrderNotesController);
+  app.patch("/api/orders/:id/notes", updateOrderNotesController);
 
   // Order query endpoints
   app.get("/api/orders/:id", getOrderController);

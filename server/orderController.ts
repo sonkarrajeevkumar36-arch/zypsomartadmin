@@ -1,7 +1,4 @@
 import { Request, Response } from "express";
-import { getFirebaseAdmin, hasAdminServiceAccountCredentials } from "./fcmController.js";
-import { getFirestore } from "firebase-admin/firestore";
-import { isShopCurrentlyOpen } from "./shopController.js";
 
 const FIREBASE_PROJECT_ID = "zypso-mart-cd989";
 const FIRESTORE_REST_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -454,21 +451,6 @@ export async function deleteOrderController(req: Request, res: Response): Promis
   }
 
   try {
-    // 1. Delete via Admin SDK if credentials are present
-    if (hasAdminServiceAccountCredentials()) {
-      try {
-        const adminApp = getFirebaseAdmin();
-        if (adminApp) {
-          const db = getFirestore(adminApp);
-          await db.collection("orders").doc(id).delete();
-          console.log(`[OrderController] Deleted order #${id} via Admin SDK.`);
-        }
-      } catch (adminErr) {
-        console.warn("[OrderController] Admin SDK delete notice:", adminErr);
-      }
-    }
-
-    // 2. Delete via REST API
     const url = `${FIRESTORE_REST_BASE}/orders/${encodeURIComponent(id)}?key=${FIREBASE_API_KEY}`;
     const headers: Record<string, string> = {};
     if (req.headers.authorization) {
@@ -478,9 +460,9 @@ export async function deleteOrderController(req: Request, res: Response): Promis
     await fetch(url, {
       method: "DELETE",
       headers
-    }).catch(() => {});
+    });
 
-    console.log(`[OrderController] Order #${id} deleted permanently by admin.`);
+    console.log(`[OrderController] Order #${id} deleted by admin.`);
 
     res.status(200).json({
       success: true,
@@ -494,57 +476,51 @@ export async function deleteOrderController(req: Request, res: Response): Promis
 }
 
 /**
- * Controller: Create Order (Customer App)
- * Strictly verifies that shop is OPEN before allowing order placement!
+ * Controller: Update internal admin notes for an order without altering status
  */
-export async function createOrderController(req: Request, res: Response): Promise<void> {
+export async function updateOrderNotesController(req: Request, res: Response): Promise<void> {
   try {
-    if (!isShopCurrentlyOpen()) {
-      res.status(403).json({
-        success: false,
-        error: "Shop is currently CLOSED 🔴. Customer ordering is temporarily paused.",
-        isShopOpen: false
-      });
+    const orderId = (req.params.id || req.body.orderId || req.body.id || "").trim();
+    const internalNotes = typeof req.body.internalNotes === "string" ? req.body.internalNotes.trim() : "";
+
+    if (!orderId) {
+      res.status(400).json({ success: false, error: "Missing order ID" });
       return;
     }
 
-    const { customerName, customerPhone, items, total } = req.body;
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      res.status(400).json({ success: false, error: "Order must contain at least one item." });
-      return;
+    const now = new Date();
+    const url = `${FIRESTORE_REST_BASE}/orders/${encodeURIComponent(orderId)}?updateMask.fieldPaths=internalNotes&updateMask.fieldPaths=adminNotes&updateMask.fieldPaths=updatedAt&key=${FIREBASE_API_KEY}`;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (req.headers.authorization) {
+      headers["Authorization"] = req.headers.authorization;
     }
 
-    const orderId = `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
-    const orderData = {
-      customerName: customerName || "Customer",
-      customerPhone: customerPhone || "N/A",
-      items,
-      total: Number(total || 0),
-      status: "pending",
-      createdAt: new Date().toISOString()
+    const body = {
+      fields: {
+        internalNotes: { stringValue: internalNotes },
+        adminNotes: { stringValue: internalNotes },
+        updatedAt: { timestampValue: now.toISOString() }
+      }
     };
 
-    // Save via Admin SDK if available
-    if (hasAdminServiceAccountCredentials()) {
-      try {
-        const adminApp = getFirebaseAdmin();
-        if (adminApp) {
-          const db = getFirestore(adminApp);
-          await db.collection("orders").doc(orderId).set(orderData);
-        }
-      } catch (adminErr) {
-        console.warn("[OrderController] Admin SDK order creation notice:", adminErr);
-      }
-    }
+    await fetch(url, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(body)
+    }).catch((err) => {
+      console.warn("[OrderController] REST patch notes notice:", err?.message || err);
+    });
 
-    res.status(201).json({
+    console.log(`[OrderController] Updated internal notes for Order #${orderId}: "${internalNotes.slice(0, 40)}"`);
+
+    res.status(200).json({
       success: true,
-      message: "Order placed successfully.",
+      message: "Internal notes saved successfully",
       orderId,
-      order: orderData
+      internalNotes
     });
   } catch (error: any) {
-    console.error("[OrderController] Error creating order:", error);
+    console.error("[OrderController] Error updating internal notes:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 }
