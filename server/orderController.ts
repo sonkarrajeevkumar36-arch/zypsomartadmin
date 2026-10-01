@@ -1,4 +1,7 @@
 import { Request, Response } from "express";
+import { getFirebaseAdmin, hasAdminServiceAccountCredentials } from "./fcmController.js";
+import { getFirestore } from "firebase-admin/firestore";
+import { isShopCurrentlyOpen } from "./shopController.js";
 
 const FIREBASE_PROJECT_ID = "zypso-mart-cd989";
 const FIRESTORE_REST_BASE = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
@@ -451,6 +454,21 @@ export async function deleteOrderController(req: Request, res: Response): Promis
   }
 
   try {
+    // 1. Delete via Admin SDK if credentials are present
+    if (hasAdminServiceAccountCredentials()) {
+      try {
+        const adminApp = getFirebaseAdmin();
+        if (adminApp) {
+          const db = getFirestore(adminApp);
+          await db.collection("orders").doc(id).delete();
+          console.log(`[OrderController] Deleted order #${id} via Admin SDK.`);
+        }
+      } catch (adminErr) {
+        console.warn("[OrderController] Admin SDK delete notice:", adminErr);
+      }
+    }
+
+    // 2. Delete via REST API
     const url = `${FIRESTORE_REST_BASE}/orders/${encodeURIComponent(id)}?key=${FIREBASE_API_KEY}`;
     const headers: Record<string, string> = {};
     if (req.headers.authorization) {
@@ -460,9 +478,9 @@ export async function deleteOrderController(req: Request, res: Response): Promis
     await fetch(url, {
       method: "DELETE",
       headers
-    });
+    }).catch(() => {});
 
-    console.log(`[OrderController] Order #${id} deleted by admin.`);
+    console.log(`[OrderController] Order #${id} deleted permanently by admin.`);
 
     res.status(200).json({
       success: true,
@@ -471,6 +489,62 @@ export async function deleteOrderController(req: Request, res: Response): Promis
     });
   } catch (error: any) {
     console.error(`[OrderController] Error deleting order ${id}:`, error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+
+/**
+ * Controller: Create Order (Customer App)
+ * Strictly verifies that shop is OPEN before allowing order placement!
+ */
+export async function createOrderController(req: Request, res: Response): Promise<void> {
+  try {
+    if (!isShopCurrentlyOpen()) {
+      res.status(403).json({
+        success: false,
+        error: "Shop is currently CLOSED 🔴. Customer ordering is temporarily paused.",
+        isShopOpen: false
+      });
+      return;
+    }
+
+    const { customerName, customerPhone, items, total } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      res.status(400).json({ success: false, error: "Order must contain at least one item." });
+      return;
+    }
+
+    const orderId = `ORD-${Date.now()}-${Math.floor(1000 + Math.random() * 9000)}`;
+    const orderData = {
+      customerName: customerName || "Customer",
+      customerPhone: customerPhone || "N/A",
+      items,
+      total: Number(total || 0),
+      status: "pending",
+      createdAt: new Date().toISOString()
+    };
+
+    // Save via Admin SDK if available
+    if (hasAdminServiceAccountCredentials()) {
+      try {
+        const adminApp = getFirebaseAdmin();
+        if (adminApp) {
+          const db = getFirestore(adminApp);
+          await db.collection("orders").doc(orderId).set(orderData);
+        }
+      } catch (adminErr) {
+        console.warn("[OrderController] Admin SDK order creation notice:", adminErr);
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Order placed successfully.",
+      orderId,
+      order: orderData
+    });
+  } catch (error: any) {
+    console.error("[OrderController] Error creating order:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 }

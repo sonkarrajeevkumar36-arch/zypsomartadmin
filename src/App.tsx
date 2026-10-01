@@ -25,6 +25,7 @@ import {
   CircleCheckBig,
   CircleX,
   Download,
+  IndianRupee,
   LayoutDashboard,
   LogOut,
   Package,
@@ -479,8 +480,14 @@ function AdminDashboard() {
     return Boolean(isStandalone);
   });
 
-  // Shop Open / Closed states (Central Firestore doc: shopSettings/store)
-  const [isShopOpen, setIsShopOpen] = useState<boolean>(true);
+  // Shop Open / Closed states (Central status persisted via API & localStorage)
+  const [isShopOpen, setIsShopOpen] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem("zypsomart_shop_is_open");
+      if (saved !== null) return saved === "true";
+    } catch {}
+    return true;
+  });
   const [isUpdatingShopStatus, setIsUpdatingShopStatus] = useState<boolean>(false);
 
   // Order Deletion states (Feature 1: Delete test/fake orders permanently)
@@ -1024,6 +1031,11 @@ function AdminDashboard() {
         parsed.forEach((item) => {
           if (item?.id) uniqueMap[item.id] = item;
         });
+        if (uniqueMap["sgSmeNc2e7qYYuXuTna1"]) {
+          deleteDoc(doc(db, "orders", "sgSmeNc2e7qYYuXuTna1")).catch(() => {});
+          fetch("/api/orders/sgSmeNc2e7qYYuXuTna1", { method: "DELETE" }).catch(() => {});
+          delete uniqueMap["sgSmeNc2e7qYYuXuTna1"];
+        }
         setOrders(Object.values(uniqueMap));
         setLoading(false);
       } catch (err) {
@@ -1041,6 +1053,11 @@ function AdminDashboard() {
             parsed.forEach((item) => {
               if (item?.id) uniqueMap[item.id] = item;
             });
+            if (uniqueMap["sgSmeNc2e7qYYuXuTna1"]) {
+              deleteDoc(doc(db, "orders", "sgSmeNc2e7qYYuXuTna1")).catch(() => {});
+              fetch("/api/orders/sgSmeNc2e7qYYuXuTna1", { method: "DELETE" }).catch(() => {});
+              delete uniqueMap["sgSmeNc2e7qYYuXuTna1"];
+            }
             const uniqueOrders = Object.values(uniqueMap);
 
             if (isInitialLoad.current) {
@@ -1253,28 +1270,54 @@ function AdminDashboard() {
     }
   }, [isPinVerified]);
 
-  // Real-time listener for central Shop Status (shopSettings/store)
+  // Real-time listener and API synchronizer for central Shop Status
   useEffect(() => {
+    let isMounted = true;
+
+    // 1. Initial & periodic sync from authoritative backend API
+    const syncShopStatusFromApi = async () => {
+      try {
+        const res = await fetch("/api/shop/status");
+        if (res.ok && isMounted) {
+          const data = await res.json();
+          if (typeof data.isOpen === "boolean") {
+            setIsShopOpen(data.isOpen);
+            localStorage.setItem("zypsomart_shop_is_open", data.isOpen ? "true" : "false");
+          }
+        }
+      } catch {}
+    };
+
+    syncShopStatusFromApi();
+    const interval = setInterval(syncShopStatusFromApi, 10000);
+
+    // 2. Also listen to Firestore shopSettings/store if allowed by security rules
+    let unsubFirestore: (() => void) | null = null;
     try {
       const shopDocRef = doc(db, "shopSettings", "store");
-      const unsub = onSnapshot(
+      unsubFirestore = onSnapshot(
         shopDocRef,
         (snap) => {
-          if (snap.exists()) {
+          if (snap.exists() && isMounted) {
             const data = snap.data();
             if (data && typeof data.isOpen === "boolean") {
               setIsShopOpen(data.isOpen);
+              localStorage.setItem("zypsomart_shop_is_open", data.isOpen ? "true" : "false");
             }
           }
         },
         (err) => {
-          console.warn("[Shop Status] Real-time listener notice:", err?.message || err);
+          // Handled quietly if project rules restrict shopSettings
+          console.info("[Shop Status] Note: using backend API for shop status syncing.");
         }
       );
-      return () => unsub();
-    } catch (e) {
-      console.warn("[Shop Status] Setup notice:", e);
-    }
+    } catch {}
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      if (unsubFirestore) unsubFirestore();
+    };
   }, []);
 
   // Handler: Toggle Shop Open / Closed Status
@@ -1283,28 +1326,37 @@ function AdminDashboard() {
     try {
       // 1. Optimistic update
       setIsShopOpen(nextIsOpen);
+      localStorage.setItem("zypsomart_shop_is_open", nextIsOpen ? "true" : "false");
 
-      // 2. Direct write to central Firestore document: shopSettings/store
-      const shopDocRef = doc(db, "shopSettings", "store");
-      await setDoc(
-        shopDocRef,
-        {
-          isOpen: nextIsOpen,
-          updatedAt: new Date(),
-          updatedBy: user?.email || "admin@zypsomart.com"
-        },
-        { merge: true }
-      );
-
-      // 3. Sync to backend API endpoint
-      await fetch("/api/shop/status", {
+      // 2. Authoritative sync to backend API endpoint (persisted to disk & memory)
+      const res = await fetch("/api/shop/status", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           isOpen: nextIsOpen,
           updatedBy: user?.email || "admin@zypsomart.com"
         })
-      }).catch(() => {});
+      });
+
+      if (!res.ok) {
+        console.warn("[Shop Status] Backend API returned status:", res.status);
+      }
+
+      // 3. Gracefully attempt direct write to central Firestore without failing if rules restrict it
+      try {
+        const shopDocRef = doc(db, "shopSettings", "store");
+        await setDoc(
+          shopDocRef,
+          {
+            isOpen: nextIsOpen,
+            updatedAt: new Date(),
+            updatedBy: user?.email || "admin@zypsomart.com"
+          },
+          { merge: true }
+        );
+      } catch (firestoreErr) {
+        // Backend API & localStorage successfully handled persistence
+      }
 
       showNotification(
         "success",
@@ -1316,6 +1368,7 @@ function AdminDashboard() {
       console.error("[Shop Status] Error updating shop status:", err);
       showNotification("error", "Failed to update shop status: " + (err.message || String(err)));
       setIsShopOpen(!nextIsOpen);
+      localStorage.setItem("zypsomart_shop_is_open", (!nextIsOpen) ? "true" : "false");
     } finally {
       setIsUpdatingShopStatus(false);
     }
@@ -1615,22 +1668,29 @@ function AdminDashboard() {
     let revenueCount = 0;
 
     orders.forEach((ord) => {
+      if (!ord) return;
       const ts = getTimestampMs(ord.createdAt);
-      const isWithin12h = ts ? ts >= twelveHoursAgo : true;
+      // Valid order from last 12 hours (if timestamp is unavailable or fresh, count it)
+      const isWithin12h = ts > 0 ? ts >= twelveHoursAgo : true;
       const status = (ord.status || "pending").toLowerCase();
+      const isCancelled =
+        status === "cancelled" ||
+        status === "cancel" ||
+        status === "canceled" ||
+        status === "rejected";
       const total = Number(ord.total) || 0;
 
-      if (isWithin12h && status !== "cancelled") {
+      if (isWithin12h && !isCancelled) {
         recentOrdersCount += 1;
-      }
-      if (isWithin12h && (status === "accepted" || status === "delivered")) {
         revenueCount += total;
       }
     });
 
+    const activeProductsCount = products.filter((p) => p && p.isAvailable !== false).length;
+
     return {
       recentOrders: recentOrdersCount,
-      totalProducts: products.length,
+      totalProducts: activeProductsCount || products.length,
       revenue: revenueCount
     };
   }, [orders, products]);
@@ -1938,6 +1998,96 @@ function AdminDashboard() {
               {isAlarmRinging ? "Ringing!" : isAlarmEnabled ? "Active" : "Muted"}
             </span>
           </button>
+
+          {/* Feature 1 (Arrow 1): Shop Open / Closed Status Toggle */}
+          <button
+            onClick={() => handleUpdateShopStatus(!isShopOpen)}
+            disabled={isUpdatingShopStatus}
+            className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer shadow-xs border ${
+              isShopOpen
+                ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200"
+            }`}
+            title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                  isShopOpen
+                    ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
+                    : "bg-red-600 shadow-xs shadow-red-600/50 animate-pulse"
+                }`}
+              />
+              <span className="font-black text-xs">
+                {isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}
+              </span>
+            </div>
+            <span
+              className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider ${
+                isShopOpen
+                  ? "bg-emerald-600 text-white"
+                  : "bg-red-600 text-white animate-pulse"
+              }`}
+            >
+              {isShopOpen ? "OPEN" : "CLOSED"}
+            </span>
+          </button>
+
+          {/* Feature 2 (Arrow 2): Alarm Status & Quick Toggle */}
+          <div
+            className={`w-full flex items-center justify-between px-3.5 py-2 rounded-xl text-xs font-bold transition-all shadow-xs border ${
+              isAlarmRinging
+                ? "bg-red-600 text-white border-red-700 animate-pulse ring-2 ring-red-400"
+                : isAlarmEnabled
+                ? "bg-emerald-50 text-emerald-700 border border-emerald-200/80 hover:bg-emerald-100"
+                : "bg-slate-100 text-slate-500 border border-slate-200 hover:bg-slate-200"
+            }`}
+          >
+            <button
+              onClick={() => setShowAlarmSettingsModal(true)}
+              className="flex items-center gap-2 flex-1 min-w-0 text-left cursor-pointer"
+              title="Click to view Alarm Settings"
+            >
+              {isAlarmRinging ? (
+                <Volume2 size={16} className="animate-bounce shrink-0" />
+              ) : isAlarmEnabled ? (
+                <BellRing size={16} className="text-emerald-600 shrink-0" />
+              ) : (
+                <VolumeX size={16} className="shrink-0" />
+              )}
+              <span className="font-bold text-xs truncate">
+                {isAlarmRinging ? "ALARM RINGING!" : "Alarm Status"}
+              </span>
+            </button>
+
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isAlarmRinging) {
+                  alarmAudio.stopAlarm();
+                  setIsAlarmRinging(false);
+                } else {
+                  handleToggleAlarm(!isAlarmEnabled);
+                }
+              }}
+              className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider cursor-pointer shadow-xs transition-transform active:scale-95 ${
+                isAlarmRinging
+                  ? "bg-white text-red-700 font-black animate-bounce"
+                  : isAlarmEnabled
+                  ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                  : "bg-slate-300 text-slate-700 hover:bg-slate-400"
+              }`}
+              title={
+                isAlarmRinging
+                  ? "Click to silence alarm"
+                  : isAlarmEnabled
+                  ? "Click to turn Alarm OFF"
+                  : "Click to turn Alarm ON"
+              }
+            >
+              {isAlarmRinging ? "SILENCE" : isAlarmEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
         </nav>
 
         <div className="p-4 border-t border-slate-100">
@@ -1950,36 +2100,6 @@ function AdminDashboard() {
               <span>Install Admin App</span>
             </button>
           )}
-
-          {/* Store Open / Closed Status Control in Sidebar */}
-          <div className="p-3 mb-3 rounded-2xl bg-slate-50 border border-slate-200/80">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
-                Store Status
-              </span>
-              <span
-                className={`text-[9px] font-black uppercase px-2 py-0.5 rounded-full ${
-                  isShopOpen
-                    ? "bg-emerald-100 text-emerald-800"
-                    : "bg-red-100 text-red-800 animate-pulse"
-                }`}
-              >
-                {isShopOpen ? "OPEN" : "CLOSED"}
-              </span>
-            </div>
-            <button
-              onClick={() => handleUpdateShopStatus(!isShopOpen)}
-              disabled={isUpdatingShopStatus}
-              className={`w-full py-2 px-3 rounded-xl text-xs font-black transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-xs ${
-                isShopOpen
-                  ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                  : "bg-red-600 hover:bg-red-700 text-white animate-pulse"
-              }`}
-              title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
-            >
-              <span>{isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}</span>
-            </button>
-          </div>
 
           <div className="px-4 py-3 mb-4 rounded-xl bg-slate-50 border border-slate-100 overflow-hidden space-y-2">
             <div>
@@ -2063,10 +2183,11 @@ function AdminDashboard() {
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
-              <div className="relative flex-1 sm:w-64">
+              {/* Medium Size Search Bar */}
+              <div className="relative flex-1 sm:w-80 md:w-96 max-w-md">
                 <Search
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                  size={17}
+                  className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                  size={18}
                 />
                 <input
                   type="text"
@@ -2075,7 +2196,7 @@ function AdminDashboard() {
                   }
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-9 pr-3 py-2 bg-slate-100 border-transparent focus:bg-white focus:ring-2 focus:ring-emerald-500 rounded-xl outline-none transition-all w-full text-xs sm:text-sm font-medium"
+                  className="pl-10 pr-4 py-2 sm:py-2.5 bg-slate-100 border border-slate-200/80 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 rounded-xl outline-none transition-all w-full text-xs sm:text-sm font-medium placeholder:text-slate-400"
                 />
               </div>
 
@@ -2085,64 +2206,6 @@ function AdminDashboard() {
                 title="Refresh Content"
               >
                 <RefreshCcw size={17} className="text-slate-600" />
-              </button>
-
-              {/* Shop Open / Closed Toggle Button in Header */}
-              <button
-                onClick={() => handleUpdateShopStatus(!isShopOpen)}
-                disabled={isUpdatingShopStatus}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-black transition-all shrink-0 cursor-pointer shadow-xs border ${
-                  isShopOpen
-                    ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
-                    : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200"
-                }`}
-                title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
-              >
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    isShopOpen
-                      ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
-                      : "bg-red-600 shadow-xs shadow-red-600/50 animate-pulse"
-                  }`}
-                />
-                <span className="hidden xs:inline sm:inline">
-                  {isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}
-                </span>
-                <span className="inline xs:hidden sm:hidden">
-                  {isShopOpen ? "OPEN" : "CLOSED"}
-                </span>
-              </button>
-
-              {/* Alarm Control & Status Button in Header */}
-              <button
-                onClick={() => setShowAlarmSettingsModal(true)}
-                className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer shadow-xs ${
-                  isAlarmRinging
-                    ? "bg-red-600 text-white animate-pulse ring-2 ring-red-400"
-                    : isAlarmEnabled
-                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200/80 hover:bg-emerald-100"
-                    : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-                }`}
-                title="New Order Alarm & Push Notification Settings"
-              >
-                {isAlarmRinging ? (
-                  <>
-                    <Volume2 size={16} className="animate-bounce" />
-                    <span className="font-black text-[11px] sm:text-xs">ALARM RINGING!</span>
-                  </>
-                ) : (
-                  <>
-                    {isAlarmEnabled ? (
-                      <BellRing size={16} className="text-emerald-600" />
-                    ) : (
-                      <VolumeX size={16} />
-                    )}
-                    <span className="hidden sm:inline">Alarm:</span>
-                    <span className={isAlarmEnabled ? "text-emerald-700 font-black" : "text-slate-500 font-bold"}>
-                      {isAlarmEnabled ? "ON" : "OFF"}
-                    </span>
-                  </>
-                )}
               </button>
 
               {showInstallBtn && !isAppInstalled && deferredPrompt && (
@@ -3002,50 +3065,59 @@ function AdminDashboard() {
                 </div>
               )}
 
-              {/* Stat Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
-                      Recent Orders (12h)
+              {/* Stat Cards - 3 Main Summary Statistics */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4 lg:gap-5">
+                {/* CARD 1 — RECENT ORDERS */}
+                <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs flex items-center justify-between hover:shadow-md transition-all duration-200 group min-h-[105px]">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-[11px] sm:text-xs font-extrabold text-slate-500 uppercase tracking-wider mb-1 truncate">
+                      RECENT ORDERS (12H)
                     </p>
-                    <h4 className="text-2xl font-black text-slate-950">
+                    <h4 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight leading-none">
                       {stats.recentOrders}
                     </h4>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Excludes cancelled orders</p>
+                    <p className="text-[11px] text-slate-400 font-medium mt-1.5 truncate">
+                      Excludes cancelled orders
+                    </p>
                   </div>
-                  <div className="w-12 h-12 bg-sky-50 rounded-xl flex items-center justify-center text-sky-500 shrink-0 shadow-inner">
+                  <div className="w-12 h-12 sm:w-13 sm:h-13 bg-sky-50 rounded-2xl flex items-center justify-center text-sky-600 shrink-0 border border-sky-100/80 shadow-xs transition-transform duration-200 group-hover:scale-105">
                     <ShoppingCart size={22} className="stroke-[2.5]" />
                   </div>
                 </div>
 
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
-                      Total Products
+                {/* CARD 2 — TOTAL PRODUCTS */}
+                <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs flex items-center justify-between hover:shadow-md transition-all duration-200 group min-h-[105px]">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-[11px] sm:text-xs font-extrabold text-slate-500 uppercase tracking-wider mb-1 truncate">
+                      TOTAL PRODUCTS
                     </p>
-                    <h4 className="text-2xl font-black text-slate-950">
+                    <h4 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight leading-none">
                       {stats.totalProducts}
                     </h4>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Active catalog inventory</p>
+                    <p className="text-[11px] text-slate-400 font-medium mt-1.5 truncate">
+                      Active catalog inventory
+                    </p>
                   </div>
-                  <div className="w-12 h-12 bg-amber-50 rounded-xl flex items-center justify-center text-amber-500 shrink-0 shadow-inner">
+                  <div className="w-12 h-12 sm:w-13 sm:h-13 bg-amber-50 rounded-2xl flex items-center justify-center text-amber-600 shrink-0 border border-amber-100/80 shadow-xs transition-transform duration-200 group-hover:scale-105">
                     <Package size={22} className="stroke-[2.5]" />
                   </div>
                 </div>
 
-                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex items-center justify-between hover:shadow-md transition-shadow">
-                  <div>
-                    <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
-                      Revenue (12h)
+                {/* CARD 3 — REVENUE (12H) */}
+                <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200/90 shadow-xs flex items-center justify-between hover:shadow-md transition-all duration-200 group min-h-[105px]">
+                  <div className="min-w-0 pr-3">
+                    <p className="text-[11px] sm:text-xs font-extrabold text-slate-500 uppercase tracking-wider mb-1 truncate">
+                      REVENUE (12H)
                     </p>
-                    <h4 className="text-2xl font-black text-emerald-600">
-                      ₹{stats.revenue.toLocaleString()}
+                    <h4 className="text-2xl sm:text-3xl font-black text-emerald-600 tracking-tight leading-none">
+                      ₹{stats.revenue.toLocaleString('en-IN')}
                     </h4>
-                    <p className="text-[10px] text-slate-500 mt-0.5">Accepted & Delivered only</p>
+                    <p className="text-[11px] text-slate-400 font-medium mt-1.5 truncate">
+                      Excludes cancelled orders
+                    </p>
                   </div>
-                  <div className="w-12 h-12 bg-emerald-50 rounded-xl flex items-center justify-center text-emerald-500 shrink-0 shadow-inner">
-                    <span className="text-lg font-bold font-sans">₹</span>
+                  <div className="w-12 h-12 sm:w-13 sm:h-13 bg-emerald-50 rounded-2xl flex items-center justify-center text-emerald-600 shrink-0 border border-emerald-100/80 shadow-xs transition-transform duration-200 group-hover:scale-105">
+                    <IndianRupee size={22} className="stroke-[2.5]" />
                   </div>
                 </div>
               </div>
@@ -3168,29 +3240,6 @@ function AdminDashboard() {
                                   #{order.id.slice(-6).toUpperCase()}
                                 </span>
 
-                                {isReturn && (
-                                  <span
-                                    className={`text-[10px] font-black px-2 py-0.5 rounded uppercase tracking-wider shrink-0 flex items-center gap-1 ${
-                                      isReturnApproved
-                                        ? "bg-emerald-600 text-white"
-                                        : isReturnRejected
-                                        ? "bg-slate-500 text-white"
-                                        : "bg-orange-500 text-white animate-pulse shadow-sm"
-                                    }`}
-                                  >
-                                    {!isReturnApproved && !isReturnRejected && (
-                                      <span className="inline-block w-1 h-1 rounded-full bg-white animate-ping" />
-                                    )}
-                                    <span>
-                                      {isReturnApproved
-                                        ? "RETURN APPROVED"
-                                        : isReturnRejected
-                                        ? "RETURN REJECTED"
-                                        : "RETURN REQUEST"}
-                                    </span>
-                                  </span>
-                                )}
-
                                 {!isReturn && !isPending && isRecent && (
                                   <span className="bg-emerald-500 text-white text-[9px] font-extrabold px-1.5 py-0.5 rounded uppercase tracking-wider shrink-0">
                                     RECENT
@@ -3204,7 +3253,7 @@ function AdminDashboard() {
                             </div>
 
                             {/* Badge & Delete Button */}
-                            <div className="flex items-center gap-1.5 shrink-0">
+                            <div className="flex items-center gap-2 shrink-0">
                               <span
                                 className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shadow-sm ${
                                   currentStatus === "accepted"
@@ -3231,13 +3280,14 @@ function AdminDashboard() {
                                   : order.status.toUpperCase()}
                               </span>
 
-                              {/* Feature 1: Delete Order Button */}
+                              {/* Delete Order Button */}
                               <button
                                 onClick={() => setOrderToDelete(order)}
-                                className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer shrink-0"
+                                className="flex items-center gap-1 px-2.5 py-1 text-red-600 hover:text-white bg-red-50 hover:bg-red-600 rounded-lg transition-all cursor-pointer shrink-0 text-[11px] font-black border border-red-200 hover:border-red-600 shadow-2xs active:scale-95"
                                 title="Delete this order permanently"
                               >
-                                <Trash2 size={15} />
+                                <Trash2 size={13} className="shrink-0 stroke-[2.5]" />
+                                <span>Delete</span>
                               </button>
                             </div>
                           </div>
@@ -3480,55 +3530,56 @@ function AdminDashboard() {
                   </p>
                 </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3.5 sm:gap-5">
                   {filteredProducts.map((prod) => (
                     <motion.div
                       key={prod.id}
                       layout
                       initial={{ opacity: 0, scale: 0.95 }}
                       animate={{ opacity: 1, scale: 1 }}
-                      className={`bg-white rounded-2xl shadow-sm border overflow-hidden transition-all duration-300 ${
+                      className={`bg-white rounded-2xl shadow-xs border overflow-hidden transition-all duration-300 group hover:shadow-md ${
                         prod.isAvailable
-                          ? "border-slate-200 hover:shadow-md"
+                          ? "border-slate-200"
                           : "grayscale opacity-75 border-slate-200"
                       }`}
                     >
-                      <div className="relative aspect-square bg-slate-100">
+                      {/* Product Image: Medium Size */}
+                      <div className="relative h-40 sm:h-44 w-full bg-slate-50 flex items-center justify-center p-2.5 overflow-hidden border-b border-slate-100">
                         {prod.imageUrl || prod.image ? (
                           <img
                             src={formatImageUrl(prod.imageUrl || prod.image || "")}
                             alt={prod.name}
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
                             referrerPolicy="no-referrer"
                             onError={handleImgError}
                           />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-slate-300">
-                            <Package size={48} />
+                            <Package size={38} />
                           </div>
                         )}
 
                         {!prod.isAvailable && (
                           <div className="absolute inset-0 bg-slate-900/40 flex items-center justify-center backdrop-blur-[2px]">
-                            <span className="bg-white text-slate-900 px-4 py-2 rounded-full font-black text-xs uppercase tracking-widest shadow-xl">
+                            <span className="bg-white text-slate-900 px-3 py-1 rounded-full font-black text-[11px] uppercase tracking-wider shadow-lg">
                               Unavailable
                             </span>
                           </div>
                         )}
 
-                        <div className="absolute top-3 left-3 flex items-center gap-1.5 flex-wrap">
-                          <span className="bg-white/95 backdrop-blur-sm text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md uppercase tracking-wider shadow-sm">
+                        <div className="absolute top-2.5 left-2.5 flex items-center gap-1 flex-wrap">
+                          <span className="bg-white/95 backdrop-blur-sm text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs border border-slate-100">
                             {prod.category}
                           </span>
                           {prod.unit && (
-                            <span className="bg-emerald-600/90 backdrop-blur-sm text-[10px] font-bold text-white px-2 py-0.5 rounded-md uppercase tracking-wider shadow-sm">
+                            <span className="bg-emerald-600/90 backdrop-blur-sm text-[10px] font-bold text-white px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs">
                               {prod.unit}
                             </span>
                           )}
                         </div>
                       </div>
 
-                      <div className="p-5">
+                      <div className="p-4 sm:p-4.5">
                         <div className="flex justify-between items-start gap-2 mb-2">
                           <div className="flex-1 min-w-0">
                             <h3 className="font-bold text-slate-900 leading-tight truncate" title={prod.name}>

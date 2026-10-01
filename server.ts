@@ -6,7 +6,8 @@ import {
   updateOrderStatusController,
   getOrderController,
   listOrdersController,
-  deleteOrderController
+  deleteOrderController,
+  createOrderController
 } from "./server/orderController.js";
 import {
   getShopStatusController,
@@ -59,6 +60,9 @@ async function startServer() {
   app.patch("/api/orders/:id/status", updateOrderStatusController);
   app.post("/api/orders/status", updateOrderStatusController);
   app.delete("/api/orders/:id", deleteOrderController);
+
+  // Order creation endpoint (strictly checks shop open status)
+  app.post("/api/orders", createOrderController);
 
   // Order query endpoints
   app.get("/api/orders/:id", getOrderController);

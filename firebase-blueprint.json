@@ -1,0 +1,47 @@
+{
+  "entities": {
+    "ShopSetting": {
+      "title": "Shop Setting",
+      "description": "Store configuration and open/closed status document",
+      "type": "object",
+      "properties": {
+        "isOpen": {
+          "type": "boolean",
+          "description": "Whether store is open for customer orders"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp of last status update"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "Admin email who changed the shop status"
+        }
+      },
+      "required": ["isOpen"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer order document",
+      "type": "object",
+      "properties": {
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "status": { "type": "string" },
+        "total": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["status", "total"]
+    }
+  },
+  "firestore": {
+    "/shopSettings/{settingId}": {
+      "schema": "ShopSetting",
+      "description": "Central store settings including open/closed status for Admin and Customer Apps"
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer orders with admin management and deletion capabilities"
+    }
+  }
+}
