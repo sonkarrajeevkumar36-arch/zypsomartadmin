@@ -17,7 +17,8 @@ import {
   addDoc,
   query,
   orderBy,
-  getDocs
+  getDocs,
+  limit
 } from "firebase/firestore";
 import {
   Bell,
@@ -378,11 +379,35 @@ export default function App() {
 
 function AdminDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  // Fast boot: hydrate products instantly from cache to avoid layout shift & eliminate redundant reads
+  const [products, setProducts] = useState<Product[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const cached = localStorage.getItem("zypsomart_cached_products_v2");
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  // Fast boot: hydrate static categories from cache
+  const [categories, setCategories] = useState<Category[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const cached = localStorage.getItem("zypsomart_cached_categories_v2");
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"orders" | "products">("orders");
   const [user, setUser] = useState<User | null>(null);
+
+  // Scalable pagination limit for real-time orders (defaults to 100 recent orders)
+  const [orderLimit, setOrderLimit] = useState<number>(100);
+  const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(false);
+  const productsLastFetchedRef = useRef<number>(0);
+  const categoriesLastFetchedRef = useRef<number>(0);
 
   // Authentication states
   const [email, setEmail] = useState("");
@@ -397,9 +422,6 @@ function AdminDashboard() {
 
   // Dashboard notification and banner error state
   const [bannerError, setBannerError] = useState("");
-
-  // Periodic timer ticker for relative time formatting
-  const [, setClockTime] = useState(Date.now());
 
   // Alerts and PWA installation states
   const [newOrderAlert, setNewOrderAlert] = useState<Order | null>(null);
@@ -497,9 +519,22 @@ function AdminDashboard() {
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState<boolean>(false);
 
-  // Filter & Search states
+  // Filter & Search states with 200ms input debouncing for smooth typing & zero lag
   const [statusFilter, setStatusFilter] = useState("all");
+  const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setSearchQuery(searchInput);
+    }, 200);
+    return () => clearTimeout(handler);
+  }, [searchInput]);
+
+  const handleSetSearch = (val: string) => {
+    setSearchInput(val);
+    setSearchQuery(val);
+  };
 
   // Internal Notes states
   const [notesInput, setNotesInput] = useState<Record<string, string>>({});
@@ -792,7 +827,7 @@ function AdminDashboard() {
     handleAcknowledgeOrder(orderId);
     setActiveTab("orders");
     setStatusFilter("all");
-    setSearchQuery(orderId.startsWith("TEST-") ? "" : orderId);
+    handleSetSearch(orderId.startsWith("TEST-") ? "" : orderId);
     setTimeout(() => {
       const el = document.getElementById(`order-card-${orderId}`);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -908,11 +943,9 @@ function AdminDashboard() {
     e.currentTarget.src = FALLBACK_IMAGE;
   };
 
-  // Auth state subscriber and data loaders
+  // Auth state subscriber and data loaders (Optimized: No static continuous listeners, no 10s timer)
   useEffect(() => {
     let unsubsOrders: any = null;
-    let unsubsProducts: any = null;
-    let unsubsCategories: any = null;
 
     const authUnsub = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
@@ -920,98 +953,116 @@ function AdminDashboard() {
         unsubsOrders();
         unsubsOrders = null;
       }
-      if (unsubsProducts) {
-        unsubsProducts();
-        unsubsProducts = null;
-      }
-      if (unsubsCategories) {
-        unsubsCategories();
-        unsubsCategories = null;
-      }
 
       if (currentUser) {
         const isVerified = checkIsPinVerified(currentUser.uid);
         setIsPinVerified(isVerified);
         unsubsOrders = startOrdersSync();
-        unsubsProducts = loadProducts();
-        unsubsCategories = loadCategories();
+        // Read products & categories once (cached in memory & localStorage)
+        fetchProducts(false);
+        fetchCategories(false);
       } else {
         setIsPinVerified(false);
         setLoading(false);
       }
     });
 
-    const timer = setInterval(() => {
-      setClockTime(Date.now());
-    }, 10000);
-
     return () => {
       authUnsub();
       if (unsubsOrders) unsubsOrders();
-      if (unsubsProducts) unsubsProducts();
-      if (unsubsCategories) unsubsCategories();
-      clearInterval(timer);
+      if (unsubscribeOrders.current) unsubscribeOrders.current();
     };
-  }, []);
+  }, [orderLimit]);
 
-  // Products realtime listener
-  const loadProducts = () => {
-    const productsCol = collection(db, "products");
-    const q = query(productsCol, orderBy("name", "asc"));
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const list = snapshot.docs.map((d) => ({
-          id: d.id,
-          ...d.data()
-        })) as Product[];
-        setProducts(list);
-      },
-      (error) => {
-        console.error("Products listener error:", error);
-        if (error.code === "failed-precondition") {
-          return onSnapshot(productsCol, (snap) => {
-            const list = snap.docs.map((d) => ({
-              id: d.id,
-              ...d.data()
-            })) as Product[];
-            list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-            setProducts(list);
-          });
+  // On-demand data loading: when switching to the Products tab, verify freshness
+  useEffect(() => {
+    if (activeTab === "products" && user) {
+      fetchProducts(false);
+      fetchCategories(false);
+    }
+  }, [activeTab, user]);
+
+  // Optimized Product catalog fetcher: single getDocs read with localStorage caching
+  const fetchProducts = async (force: boolean = false) => {
+    const now = Date.now();
+    // Cache TTL: 5 minutes if not forced and products are already cached
+    if (!force && products.length > 0 && now - productsLastFetchedRef.current < 5 * 60 * 1000) {
+      return;
+    }
+    setIsLoadingProducts(true);
+    try {
+      const productsCol = collection(db, "products");
+      const q = query(productsCol, orderBy("name", "asc"));
+      let snap;
+      try {
+        snap = await getDocs(q);
+      } catch (err: any) {
+        if (err?.code === "failed-precondition") {
+          snap = await getDocs(productsCol);
+        } else {
+          throw err;
         }
-        setBannerError("Notice: Unable to sync products - " + error.message);
       }
-    );
+      const list = snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data()
+      })) as Product[];
+      list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      setProducts(list);
+      productsLastFetchedRef.current = now;
+      try {
+        localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(list));
+      } catch {}
+    } catch (error: any) {
+      console.warn("[Products] getDocs fetch notice:", error?.message || error);
+    } finally {
+      setIsLoadingProducts(false);
+    }
   };
 
-  // Categories realtime listener and auto-seed
-  const loadCategories = () => {
-    const q = query(collection(db, "categories"), orderBy("name", "asc"));
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const list = snapshot.docs.map((d) => ({
-          id: d.id,
-          ...d.data()
-        })) as Category[];
-        setCategories(list);
-
-        if (list.length === 0 && !seededCategories.current && auth.currentUser) {
-          seededCategories.current = true;
-          const defaults = ["Fruits", "Vegetables", "Dairy", "Bakery", "Beverages", "Snacks"];
-          defaults.forEach(async (catName) => {
-            try {
-              await addDoc(collection(db, "categories"), { name: catName });
-            } catch (err) {
-              console.error("Error seeding default category:", err);
-            }
-          });
-        }
-      },
-      (error) => {
-        console.error("Categories listener error:", error);
+  // Optimized Categories fetcher: static catalog data cached for 30 minutes
+  const fetchCategories = async (force: boolean = false) => {
+    const now = Date.now();
+    if (!force && categories.length > 0 && now - categoriesLastFetchedRef.current < 30 * 60 * 1000) {
+      return;
+    }
+    try {
+      const catCol = collection(db, "categories");
+      const q = query(catCol, orderBy("name", "asc"));
+      let snap;
+      try {
+        snap = await getDocs(q);
+      } catch {
+        snap = await getDocs(catCol);
       }
-    );
+      const list = snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data()
+      })) as Category[];
+      list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      setCategories(list);
+      categoriesLastFetchedRef.current = now;
+      try {
+        localStorage.setItem("zypsomart_cached_categories_v2", JSON.stringify(list));
+      } catch {}
+
+      if (list.length === 0 && !seededCategories.current && auth.currentUser) {
+        seededCategories.current = true;
+        const defaults = ["Fruits", "Vegetables", "Dairy", "Bakery", "Beverages", "Snacks"];
+        for (const catName of defaults) {
+          try {
+            await addDoc(collection(db, "categories"), { name: catName });
+          } catch (err) {
+            console.error("Error seeding default category:", err);
+          }
+        }
+        const reSnap = await getDocs(collection(db, "categories"));
+        const seeded = reSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as Category[];
+        setCategories(seeded);
+      }
+    } catch (error: any) {
+      console.warn("[Categories] getDocs fetch notice:", error?.message || error);
+    }
   };
 
   // Real-time Orders Sync with auto-reconnect and composite index fallback
@@ -1027,7 +1078,7 @@ function AdminDashboard() {
 
     setSyncStatus(reconnectAttempts.current > 0 ? "reconnecting" : "connecting");
     const ordersCol = collection(db, "orders");
-    const orderedQuery = query(ordersCol, orderBy("createdAt", "desc"));
+    const orderedQuery = query(ordersCol, orderBy("createdAt", "desc"), limit(orderLimit));
 
     // Fallback getDocs fetch if snapshot connection falters
     const fallbackFetch = async (targetQuery: any) => {
@@ -1134,7 +1185,7 @@ function AdminDashboard() {
                 "[Orders Sync] Sorted query requires composite index. Falling back to base collection query."
               );
               unsub();
-              attachListener(ordersCol, true);
+              attachListener(query(ordersCol, limit(orderLimit)), true);
               return;
             }
 
@@ -1265,7 +1316,7 @@ function AdminDashboard() {
     if (orderIdParam) {
       setActiveTab("orders");
       setStatusFilter("all");
-      setSearchQuery(orderIdParam);
+      handleSetSearch(orderIdParam);
       // Clean query parameter from address bar cleanly without page refresh
       const newUrl = window.location.pathname + (tabParam ? `?tab=${tabParam}` : "?tab=orders");
       window.history.replaceState({}, document.title, newUrl);
@@ -1277,11 +1328,10 @@ function AdminDashboard() {
     }
   }, [isPinVerified]);
 
-  // Real-time listener and API synchronizer for central Shop Status
+  // Optimized Shop Status sync: cached in localStorage & disk, synced on mount + focus
   useEffect(() => {
     let isMounted = true;
 
-    // 1. Initial & periodic sync from authoritative backend API
     const syncShopStatusFromApi = async () => {
       try {
         const res = await fetch("/api/shop/status");
@@ -1295,35 +1345,23 @@ function AdminDashboard() {
       } catch {}
     };
 
+    // Initial sync
     syncShopStatusFromApi();
-    const interval = setInterval(syncShopStatusFromApi, 10000);
 
-    // 2. Also listen to Firestore shopSettings/store if allowed by security rules
-    let unsubFirestore: (() => void) | null = null;
-    try {
-      const shopDocRef = doc(db, "shopSettings", "store");
-      unsubFirestore = onSnapshot(
-        shopDocRef,
-        (snap) => {
-          if (snap.exists() && isMounted) {
-            const data = snap.data();
-            if (data && typeof data.isOpen === "boolean") {
-              setIsShopOpen(data.isOpen);
-              localStorage.setItem("zypsomart_shop_is_open", data.isOpen ? "true" : "false");
-            }
-          }
-        },
-        (err) => {
-          // Handled quietly if project rules restrict shopSettings
-          console.info("[Shop Status] Note: using backend API for shop status syncing.");
-        }
-      );
-    } catch {}
+    // Check status only on window focus or visibility change without hammering the server
+    const handleFocusOrVisible = () => {
+      if (document.visibilityState === "visible") {
+        syncShopStatusFromApi();
+      }
+    };
+
+    window.addEventListener("focus", handleFocusOrVisible);
+    document.addEventListener("visibilitychange", handleFocusOrVisible);
 
     return () => {
       isMounted = false;
-      clearInterval(interval);
-      if (unsubFirestore) unsubFirestore();
+      window.removeEventListener("focus", handleFocusOrVisible);
+      document.removeEventListener("visibilitychange", handleFocusOrVisible);
     };
   }, []);
 
@@ -1593,9 +1631,19 @@ function AdminDashboard() {
     return url;
   };
 
-  // Product availability toggle
+  // Product availability toggle with optimistic cache sync
   const handleToggleProductAvailability = async (productId: string, currentStatus: boolean) => {
     try {
+      setProducts((prev) => {
+        const next = prev.map((p) =>
+          p.id === productId ? { ...p, isAvailable: !currentStatus } : p
+        );
+        try {
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
       await updateDoc(doc(db, "products", productId), {
         isAvailable: !currentStatus
       });
@@ -1605,10 +1653,11 @@ function AdminDashboard() {
       );
     } catch (err: any) {
       showNotification("error", "Error updating product: " + err.message);
+      fetchProducts(true);
     }
   };
 
-  // Product Add / Edit save handler
+  // Product Add / Edit save handler with optimistic cache sync
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     const name = productForm.name.trim();
@@ -1662,9 +1711,28 @@ function AdminDashboard() {
 
       if (editingProduct?.id) {
         await updateDoc(doc(db, "products", editingProduct.id), payload);
+        setProducts((prev) => {
+          const next = prev.map((p) =>
+            p.id === editingProduct.id ? { ...p, ...payload, id: editingProduct.id } : p
+          );
+          try {
+            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
         showNotification("success", `Product "${name}" updated successfully`);
       } else {
-        await addDoc(collection(db, "products"), payload);
+        const newDocRef = await addDoc(collection(db, "products"), payload);
+        const newProduct = { id: newDocRef.id, ...payload } as Product;
+        setProducts((prev) => {
+          const next = [...prev, newProduct].sort((a, b) =>
+            (a.name || "").localeCompare(b.name || "")
+          );
+          try {
+            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
         showNotification("success", `Product "${name}" added successfully`);
       }
 
@@ -1699,26 +1767,37 @@ function AdminDashboard() {
     setShowProductModal(true);
   };
 
-  // Delete Product
+  // Delete Product with optimistic cache sync
   const handleDeleteProduct = async (productId: string) => {
     if (window.confirm("Are you sure you want to delete this product?")) {
       try {
+        setProducts((prev) => {
+          const next = prev.filter((p) => p.id !== productId);
+          try {
+            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
         await deleteDoc(doc(db, "products", productId));
         showNotification("success", "Product deleted successfully");
       } catch (err: any) {
         showNotification("error", "Delete failed: " + err.message);
+        fetchProducts(true);
       }
     }
   };
 
-  // Filtered orders list by search query
-  const searchedOrders = orders.filter((ord) => {
-    const name = (ord.customerName || "").toLowerCase();
-    const phone = ord.customerPhone || "";
-    const id = ord.id || "";
-    const q = searchQuery.toLowerCase();
-    return name.includes(q) || phone.includes(q) || id.toLowerCase().includes(q);
-  });
+  // Memoized searched orders list by debounced search query
+  const searchedOrders = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return orders;
+    return orders.filter((ord) => {
+      const name = (ord.customerName || "").toLowerCase();
+      const phone = ord.customerPhone || "";
+      const id = (ord.id || "").toLowerCase();
+      return name.includes(q) || phone.includes(q) || id.includes(q);
+    });
+  }, [orders, searchQuery]);
 
   // 12-Hour Statistics calculation
   const stats = useMemo(() => {
@@ -1768,12 +1847,16 @@ function AdminDashboard() {
     return list.sort((a, b) => getTimestampMs(b.createdAt) - getTimestampMs(a.createdAt));
   }, [searchedOrders, statusFilter]);
 
-  // Filtered products list
-  const filteredProducts = products.filter(
-    (p) =>
-      p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      p.category.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Filtered products list memoized by debounced search query
+  const filteredProducts = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return products;
+    return products.filter(
+      (p) =>
+        (p.name || "").toLowerCase().includes(q) ||
+        (p.category || "").toLowerCase().includes(q)
+    );
+  }, [products, searchQuery]);
 
   // View: Unauthenticated Sign In Screen
   if (!user) {
@@ -2212,6 +2295,8 @@ function AdminDashboard() {
                   <img
                     src={appLogo}
                     alt="Zypso Mart Logo"
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full object-contain"
                     referrerPolicy="no-referrer"
                   />
@@ -2242,7 +2327,7 @@ function AdminDashboard() {
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
-              {/* Medium Size Search Bar */}
+              {/* Medium Size Debounced Search Bar */}
               <div className="relative flex-1 sm:w-80 md:w-96 max-w-md">
                 <Search
                   className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
@@ -2253,18 +2338,32 @@ function AdminDashboard() {
                   placeholder={
                     activeTab === "orders" ? "Search orders..." : "Search products..."
                   }
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="pl-10 pr-4 py-2 sm:py-2.5 bg-slate-100 border border-slate-200/80 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 rounded-xl outline-none transition-all w-full text-xs sm:text-sm font-medium placeholder:text-slate-400"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                  className="pl-10 pr-9 py-2 sm:py-2.5 bg-slate-100 border border-slate-200/80 focus:bg-white focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 rounded-xl outline-none transition-all w-full text-xs sm:text-sm font-medium placeholder:text-slate-400"
                 />
+                {searchInput && (
+                  <button
+                    type="button"
+                    onClick={() => handleSetSearch("")}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                    title="Clear search"
+                  >
+                    <X size={15} />
+                  </button>
+                )}
               </div>
 
               <button
-                onClick={() => (activeTab === "orders" ? startOrdersSync() : loadProducts())}
-                className="p-2 sm:p-2.5 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors shrink-0 cursor-pointer"
-                title="Refresh Content"
+                onClick={() => (activeTab === "orders" ? startOrdersSync() : fetchProducts(true))}
+                disabled={isLoadingProducts}
+                className="p-2 sm:p-2.5 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-50"
+                title={activeTab === "orders" ? "Reconnect / Refresh Orders" : "Refresh Product Catalog"}
               >
-                <RefreshCcw size={17} className="text-slate-600" />
+                <RefreshCcw
+                  size={17}
+                  className={`text-slate-600 ${isLoadingProducts ? "animate-spin text-emerald-600" : ""}`}
+                />
               </button>
 
               {showInstallBtn && !isAppInstalled && deferredPrompt && (
