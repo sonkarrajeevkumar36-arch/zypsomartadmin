@@ -37,6 +37,13 @@ export interface Product {
   imageUrl?: string;
   description?: string;
   isAvailable: boolean;
+  isOffer?: boolean;
+  offerType?: "percentage" | "fixed";
+  offerValue?: number;
+  offerPrice?: number;
+  offerStartDate?: string | null;
+  offerEndDate?: string | null;
+  offerEnabled?: boolean;
 }
 
 export interface Category {

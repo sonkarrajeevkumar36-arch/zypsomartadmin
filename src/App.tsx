@@ -48,7 +48,17 @@ import {
   Laptop,
   Radio,
   Clock,
-  X
+  X,
+  Tag,
+  BadgePercent,
+  Percent,
+  Calendar,
+  Flame,
+  Sparkles,
+  Filter,
+  Check,
+  ToggleLeft,
+  ToggleRight
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import appLogo from "./assets/images/logo.png";
@@ -292,6 +302,89 @@ export const COMMON_PRODUCT_UNITS = [
   "box"
 ];
 
+export const DEFAULT_PRESET_CATEGORIES = [
+  "Fruits",
+  "Vegetables",
+  "Dairy & Eggs",
+  "Bakery & Bread",
+  "Snacks & Chips",
+  "Beverages",
+  "Personal Care",
+  "Cosmetics",
+  "Fast Food",
+  "Stationary",
+  "Electronic Products",
+  "Household Essentials",
+  "Sweets & Confectionery"
+];
+
+// Helper to determine active pricing, discount badge, and offer validity
+export function getProductPricing(product: Product) {
+  const originalPrice = Number(product.price) || 0;
+  const isOfferConfigured = Boolean(product.isOffer);
+
+  if (!isOfferConfigured) {
+    return {
+      hasActiveOffer: false,
+      isOffer: false,
+      offerStatus: "none" as "none" | "active" | "upcoming" | "expired" | "disabled",
+      originalPrice,
+      finalPrice: originalPrice,
+      discountPercent: 0,
+      discountText: "",
+      savings: 0
+    };
+  }
+
+  const now = new Date();
+  let status: "active" | "upcoming" | "expired" | "disabled" = "active";
+
+  if (!product.offerEnabled) {
+    status = "disabled";
+  } else if (product.offerStartDate && new Date(product.offerStartDate) > now) {
+    status = "upcoming";
+  } else if (product.offerEndDate && new Date(product.offerEndDate) < now) {
+    status = "expired";
+  }
+
+  const isActive = status === "active";
+  let finalPrice = originalPrice;
+  if (
+    isActive &&
+    typeof product.offerPrice === "number" &&
+    product.offerPrice > 0 &&
+    product.offerPrice < originalPrice
+  ) {
+    finalPrice = product.offerPrice;
+  } else if (isActive && product.offerValue && product.offerValue > 0) {
+    if (product.offerType === "fixed") {
+      finalPrice = Math.max(0, originalPrice - product.offerValue);
+    } else {
+      finalPrice = Math.max(0, Math.round(originalPrice * (1 - product.offerValue / 100)));
+    }
+  }
+
+  const savings = Math.max(0, originalPrice - finalPrice);
+  const discountPercent =
+    originalPrice > 0 && savings > 0 ? Math.round((savings / originalPrice) * 100) : 0;
+
+  const discountText =
+    product.offerType === "fixed"
+      ? `₹${product.offerValue} OFF`
+      : `${product.offerValue || discountPercent}% OFF`;
+
+  return {
+    hasActiveOffer: isActive && savings > 0,
+    isOffer: true,
+    offerStatus: status,
+    originalPrice,
+    finalPrice,
+    discountPercent,
+    discountText,
+    savings
+  };
+}
+
 interface ErrorBoundaryProps {
   children: React.ReactNode;
 }
@@ -311,28 +404,10 @@ class GlobalErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySta
   }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    const msg = error?.message || "";
-    if (
-      msg.includes("WebSocket") ||
-      msg.includes("websocket") ||
-      msg.includes("Cloud Firestore backend") ||
-      msg.includes("offline mode")
-    ) {
-      return { hasError: false, error: null };
-    }
     return { hasError: true, error };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    const msg = error?.message || "";
-    if (
-      msg.includes("WebSocket") ||
-      msg.includes("websocket") ||
-      msg.includes("Cloud Firestore backend") ||
-      msg.includes("offline mode")
-    ) {
-      return;
-    }
     console.error("[Global Error Boundary] Caught exception:", error, errorInfo);
   }
 
@@ -400,7 +475,7 @@ function AdminDashboard() {
     }
   });
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"orders" | "products">("orders");
+  const [activeTab, setActiveTab] = useState<"orders" | "products" | "offers">("orders");
   const [user, setUser] = useState<User | null>(null);
 
   // Scalable pagination limit for real-time orders (defaults to 100 recent orders)
@@ -429,7 +504,11 @@ function AdminDashboard() {
   // New Order Alarm & Push Notification States
   const [isAlarmEnabled, setIsAlarmEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    return localStorage.getItem("zypsomart_alarm_enabled") !== "false";
+    try {
+      return localStorage.getItem("zypsomart_alarm_enabled") !== "false";
+    } catch {
+      return true;
+    }
   });
   const isAlarmEnabledRef = useRef(isAlarmEnabled);
   isAlarmEnabledRef.current = isAlarmEnabled;
@@ -437,7 +516,11 @@ function AdminDashboard() {
   const [isAlarmRinging, setIsAlarmRinging] = useState(false);
   const [showAlarmSettingsModal, setShowAlarmSettingsModal] = useState(false);
   const [notificationPermissionState, setNotificationPermissionState] = useState<string>(() => {
-    return getNotificationPermission();
+    try {
+      return getNotificationPermission();
+    } catch {
+      return "unsupported";
+    }
   });
   const [isRegisteringPush, setIsRegisteringPush] = useState(false);
   const [pushStatusMessage, setPushStatusMessage] = useState("");
@@ -497,12 +580,16 @@ function AdminDashboard() {
   const [showInstallModal, setShowInstallModal] = useState(false);
   const [isAppInstalled, setIsAppInstalled] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
-    const isStandalone =
-      window.matchMedia("(display-mode: standalone)").matches ||
-      (window.navigator as any).standalone === true ||
-      document.referrer.includes("android-app://") ||
-      localStorage.getItem("zypsomart_pwa_installed") === "true";
-    return Boolean(isStandalone);
+    try {
+      const isStandalone =
+        (typeof window.matchMedia === "function" && window.matchMedia("(display-mode: standalone)").matches) ||
+        (window.navigator as any)?.standalone === true ||
+        (typeof document !== "undefined" && document.referrer && document.referrer.includes("android-app://")) ||
+        localStorage.getItem("zypsomart_pwa_installed") === "true";
+      return Boolean(isStandalone);
+    } catch {
+      return false;
+    }
   });
 
   // Shop Open / Closed states (Central status persisted via API & localStorage)
@@ -552,6 +639,25 @@ function AdminDashboard() {
     description: "",
     isAvailable: true
   });
+  const [isSavingProduct, setIsSavingProduct] = useState(false);
+
+  // Offer modal states & management
+  const [showOfferModal, setShowOfferModal] = useState(false);
+  const [productForOffer, setProductForOffer] = useState<Product | null>(null);
+  const [offerForm, setOfferForm] = useState({
+    offerType: "percentage" as "percentage" | "fixed",
+    offerValue: "",
+    offerStartDate: "",
+    offerEndDate: "",
+    offerEnabled: true
+  });
+  const [isSavingOffer, setIsSavingOffer] = useState(false);
+
+  // Offers tab filters
+  const [offerStatusFilter, setOfferStatusFilter] = useState<
+    "all" | "active" | "upcoming" | "expired" | "disabled"
+  >("all");
+  const [offerCategoryFilter, setOfferCategoryFilter] = useState<string>("all");
 
   // Listener and sync states
   const isInitialLoad = useRef(true);
@@ -934,6 +1040,30 @@ function AdminDashboard() {
       : "Just now";
   };
 
+  // Full timestamp formatter for CSV export & audit logs
+  const formatFullDateTime = (val: any): string => {
+    if (!val) return "N/A";
+    let d: Date | null = null;
+    if (typeof val.toDate === "function") d = val.toDate();
+    else if (val instanceof Date) d = val;
+    else if (typeof val === "number") d = new Date(val);
+    else if (val?.seconds) d = new Date(val.seconds * 1000);
+    else {
+      const parsed = Date.parse(val);
+      if (!isNaN(parsed)) d = new Date(parsed);
+    }
+    if (!d) return "N/A";
+    return d.toLocaleString("en-IN", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true
+    });
+  };
+
   const showNotification = (type: "success" | "error", text: string) => {
     setToast({ type, text });
     setTimeout(() => setToast(null), 3500);
@@ -974,15 +1104,15 @@ function AdminDashboard() {
     };
   }, [orderLimit]);
 
-  // On-demand data loading: when switching to the Products tab, verify freshness
+  // On-demand data loading: when switching to Products or Offers tab, verify freshness
   useEffect(() => {
-    if (activeTab === "products" && user) {
+    if ((activeTab === "products" || activeTab === "offers") && user) {
       fetchProducts(false);
       fetchCategories(false);
     }
   }, [activeTab, user]);
 
-  // Optimized Product catalog fetcher: single getDocs read with localStorage caching
+  // Optimized Product catalog fetcher: single getDocs read with server API fallback and localStorage caching
   const fetchProducts = async (force: boolean = false) => {
     const now = Date.now();
     // Cache TTL: 5 minutes if not forced and products are already cached
@@ -991,75 +1121,110 @@ function AdminDashboard() {
     }
     setIsLoadingProducts(true);
     try {
-      const productsCol = collection(db, "products");
-      const q = query(productsCol, orderBy("name", "asc"));
-      let snap;
+      let list: Product[] = [];
       try {
-        snap = await getDocs(q);
-      } catch (err: any) {
-        if (err?.code === "failed-precondition") {
-          snap = await getDocs(productsCol);
-        } else {
-          throw err;
+        const productsCol = collection(db, "products");
+        const q = query(productsCol, orderBy("name", "asc"));
+        let snap;
+        try {
+          snap = await getDocs(q);
+        } catch (err: any) {
+          if (err?.code === "failed-precondition") {
+            snap = await getDocs(productsCol);
+          } else {
+            throw err;
+          }
+        }
+        list = snap.docs.map((d) => ({
+          id: d.id,
+          ...d.data()
+        })) as Product[];
+      } catch (clientErr: any) {
+        console.warn("[Products] Firestore direct fetch notice:", clientErr?.message || clientErr);
+      }
+
+      // If client Firestore failed or returned empty, fetch from /api/products
+      if (list.length === 0) {
+        try {
+          const apiRes = await fetch("/api/products");
+          if (apiRes.ok) {
+            const apiData = await apiRes.json();
+            if (Array.isArray(apiData.products) && apiData.products.length > 0) {
+              list = apiData.products;
+            }
+          }
+        } catch (apiErr) {
+          console.warn("[Products] API fallback fetch notice:", apiErr);
         }
       }
-      const list = snap.docs.map((d) => ({
-        id: d.id,
-        ...d.data()
-      })) as Product[];
-      list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
-      setProducts(list);
-      productsLastFetchedRef.current = now;
-      try {
-        localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(list));
-      } catch {}
+
+      if (list.length > 0) {
+        list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+        setProducts(list);
+        productsLastFetchedRef.current = now;
+        try {
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(list));
+        } catch {}
+      }
     } catch (error: any) {
-      console.warn("[Products] getDocs fetch notice:", error?.message || error);
+      console.warn("[Products] fetch notice:", error?.message || error);
     } finally {
       setIsLoadingProducts(false);
     }
   };
 
-  // Optimized Categories fetcher: static catalog data cached for 30 minutes
+  // Optimized Categories fetcher: static catalog data cached for 30 minutes with fallback presets
   const fetchCategories = async (force: boolean = false) => {
     const now = Date.now();
     if (!force && categories.length > 0 && now - categoriesLastFetchedRef.current < 30 * 60 * 1000) {
       return;
     }
     try {
-      const catCol = collection(db, "categories");
-      const q = query(catCol, orderBy("name", "asc"));
-      let snap;
+      let list: Category[] = [];
       try {
-        snap = await getDocs(q);
-      } catch {
-        snap = await getDocs(catCol);
+        const catCol = collection(db, "categories");
+        const q = query(catCol, orderBy("name", "asc"));
+        let snap;
+        try {
+          snap = await getDocs(q);
+        } catch {
+          snap = await getDocs(catCol);
+        }
+        list = snap.docs.map((d) => ({
+          id: d.id,
+          ...d.data()
+        })) as Category[];
+      } catch (err) {
+        console.warn("[Categories] Firestore direct fetch notice:", err);
       }
-      const list = snap.docs.map((d) => ({
-        id: d.id,
-        ...d.data()
-      })) as Category[];
+
+      // Fallback to /api/categories if Firestore has 0 or failed
+      if (list.length === 0) {
+        try {
+          const apiRes = await fetch("/api/categories");
+          if (apiRes.ok) {
+            const apiData = await apiRes.json();
+            if (Array.isArray(apiData.categories) && apiData.categories.length > 0) {
+              list = apiData.categories;
+            }
+          }
+        } catch {}
+      }
+
+      // Final fallback to defaults so dropdown is never broken
+      if (list.length === 0) {
+        list = DEFAULT_PRESET_CATEGORIES.map((name, i) => ({
+          id: `preset_cat_${i + 1}`,
+          name
+        }));
+      }
+
       list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
       setCategories(list);
       categoriesLastFetchedRef.current = now;
       try {
         localStorage.setItem("zypsomart_cached_categories_v2", JSON.stringify(list));
       } catch {}
-
-      if (list.length === 0 && !seededCategories.current && auth.currentUser) {
-        seededCategories.current = true;
-        const defaults = ["Fruits", "Vegetables", "Dairy", "Bakery", "Beverages", "Snacks"];
-        for (const catName of defaults) {
-          try {
-            await addDoc(collection(db, "categories"), { name: catName });
-          } catch (err) {
-            console.error("Error seeding default category:", err);
-          }
-        }
-        const reSnap = await getDocs(collection(db, "categories"));
-        const seeded = reSnap.docs.map((d) => ({ id: d.id, ...d.data() })) as Category[];
-        setCategories(seeded);
-      }
     } catch (error: any) {
       console.warn("[Categories] getDocs fetch notice:", error?.message || error);
     }
@@ -1633,10 +1798,11 @@ function AdminDashboard() {
 
   // Product availability toggle with optimistic cache sync
   const handleToggleProductAvailability = async (productId: string, currentStatus: boolean) => {
+    const nextStatus = !currentStatus;
     try {
       setProducts((prev) => {
         const next = prev.map((p) =>
-          p.id === productId ? { ...p, isAvailable: !currentStatus } : p
+          p.id === productId ? { ...p, isAvailable: nextStatus } : p
         );
         try {
           localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
@@ -1644,12 +1810,23 @@ function AdminDashboard() {
         return next;
       });
 
-      await updateDoc(doc(db, "products", productId), {
-        isAvailable: !currentStatus
-      });
+      // Try client Firestore update
+      try {
+        await updateDoc(doc(db, "products", productId), {
+          isAvailable: nextStatus
+        });
+      } catch (clientErr) {
+        // Fallback to server API
+        await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isAvailable: nextStatus })
+        }).catch(() => {});
+      }
+
       showNotification(
         "success",
-        `Product marked as ${!currentStatus ? "Available" : "Unavailable"}`
+        `Product marked as ${nextStatus ? "Available" : "Unavailable"}`
       );
     } catch (err: any) {
       showNotification("error", "Error updating product: " + err.message);
@@ -1657,9 +1834,11 @@ function AdminDashboard() {
     }
   };
 
-  // Product Add / Edit save handler with optimistic cache sync
+  // Product Add / Edit save handler with dual-layer persistence (Firestore + Server API fallback)
   const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingProduct) return;
+
     const name = productForm.name.trim();
     const category = productForm.category.trim();
     const unit = productForm.unit.trim() || "piece";
@@ -1679,20 +1858,23 @@ function AdminDashboard() {
       return;
     }
     if (!editingProduct && !image) {
-      showNotification("error", "Image URL is required.");
+      showNotification("error", "Image URL is required for new products.");
       return;
     }
 
     // Check duplicate name
     if (
       products.some(
-        (p) => p.name.toLowerCase() === name.toLowerCase() && (!editingProduct || p.id !== editingProduct.id)
+        (p) =>
+          p.name.toLowerCase() === name.toLowerCase() &&
+          (!editingProduct || p.id !== editingProduct.id)
       )
     ) {
       showNotification("error", "A product with this name already exists.");
       return;
     }
 
+    setIsSavingProduct(true);
     try {
       const payload: Record<string, any> = {
         name,
@@ -1709,11 +1891,63 @@ function AdminDashboard() {
         payload.imageUrl = formattedImg;
       }
 
+      // Preserve existing offer fields when editing
+      if (editingProduct?.isOffer !== undefined) {
+        payload.isOffer = editingProduct.isOffer;
+        payload.offerType = editingProduct.offerType;
+        payload.offerValue = editingProduct.offerValue;
+        payload.offerStartDate = editingProduct.offerStartDate;
+        payload.offerEndDate = editingProduct.offerEndDate;
+        payload.offerEnabled = editingProduct.offerEnabled;
+        if (editingProduct.isOffer && editingProduct.offerValue) {
+          if (editingProduct.offerType === "percentage") {
+            payload.offerPrice = Math.max(0, Math.round(price * (1 - editingProduct.offerValue / 100)));
+          } else {
+            payload.offerPrice = Math.max(0, Math.round(price - editingProduct.offerValue));
+          }
+        }
+      }
+
+      let savedProduct: Product | null = null;
+
       if (editingProduct?.id) {
-        await updateDoc(doc(db, "products", editingProduct.id), payload);
+        const prodId = editingProduct.id;
+        // 1. Try Firestore client SDK
+        try {
+          await updateDoc(doc(db, "products", prodId), payload);
+          savedProduct = { ...editingProduct, ...payload, id: prodId };
+        } catch (fsErr: any) {
+          console.warn("[Product Edit] Direct Firestore update notice, syncing with server API:", fsErr?.message || fsErr);
+        }
+
+        // 2. Server API sync / fallback
+        if (!savedProduct) {
+          const res = await fetch(`/api/products/${encodeURIComponent(prodId)}`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              ...(auth.currentUser ? { Authorization: `Bearer ${await auth.currentUser.getIdToken()}` } : {})
+            },
+            body: JSON.stringify({ ...payload, id: prodId })
+          });
+          if (!res.ok) {
+            const errJson = await res.json().catch(() => ({}));
+            throw new Error(errJson.error || `Failed to update product (HTTP ${res.status})`);
+          }
+          const resData = await res.json();
+          savedProduct = resData.product || { ...editingProduct, ...payload, id: prodId };
+        } else {
+          // Sync server background cache as well
+          fetch(`/api/products/${encodeURIComponent(prodId)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...payload, id: prodId })
+          }).catch(() => {});
+        }
+
         setProducts((prev) => {
           const next = prev.map((p) =>
-            p.id === editingProduct.id ? { ...p, ...payload, id: editingProduct.id } : p
+            p.id === prodId ? { ...p, ...savedProduct!, id: prodId } : p
           );
           try {
             localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
@@ -1722,18 +1956,52 @@ function AdminDashboard() {
         });
         showNotification("success", `Product "${name}" updated successfully`);
       } else {
-        const newDocRef = await addDoc(collection(db, "products"), payload);
-        const newProduct = { id: newDocRef.id, ...payload } as Product;
-        setProducts((prev) => {
-          const next = [...prev, newProduct].sort((a, b) =>
-            (a.name || "").localeCompare(b.name || "")
-          );
-          try {
-            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
-          } catch {}
-          return next;
-        });
-        showNotification("success", `Product "${name}" added successfully`);
+        // Adding new product
+        // 1. Try Firestore client SDK
+        try {
+          const newDocRef = await addDoc(collection(db, "products"), payload);
+          savedProduct = { id: newDocRef.id, ...payload } as Product;
+        } catch (fsErr: any) {
+          console.warn("[Product Add] Direct Firestore add notice, creating via server API:", fsErr?.message || fsErr);
+        }
+
+        // 2. Server API fallback if direct write failed
+        if (!savedProduct) {
+          const res = await fetch("/api/products", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(auth.currentUser ? { Authorization: `Bearer ${await auth.currentUser.getIdToken()}` } : {})
+            },
+            body: JSON.stringify(payload)
+          });
+          if (!res.ok) {
+            const errJson = await res.json().catch(() => ({}));
+            throw new Error(errJson.error || `Failed to create product (HTTP ${res.status})`);
+          }
+          const resData = await res.json();
+          savedProduct = resData.product;
+        } else {
+          // Sync server background cache
+          fetch("/api/products", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(savedProduct)
+          }).catch(() => {});
+        }
+
+        if (savedProduct) {
+          setProducts((prev) => {
+            const next = [savedProduct!, ...prev.filter((p) => p.id !== savedProduct!.id)].sort(
+              (a, b) => (a.name || "").localeCompare(b.name || "")
+            );
+            try {
+              localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+          showNotification("success", `Product "${name}" added successfully`);
+        }
       }
 
       setShowProductModal(false);
@@ -1748,7 +2016,10 @@ function AdminDashboard() {
         isAvailable: true
       });
     } catch (err: any) {
+      console.error("[Save Product] Error:", err);
       showNotification("error", "Failed: " + err.message);
+    } finally {
+      setIsSavingProduct(false);
     }
   };
 
@@ -1762,14 +2033,16 @@ function AdminDashboard() {
       unit: product.unit || "piece",
       image: product.imageUrl || product.image || "",
       description: product.description || "",
-      isAvailable: product.isAvailable
+      isAvailable: product.isAvailable !== false
     });
     setShowProductModal(true);
   };
 
-  // Delete Product with optimistic cache sync
+  // Delete Product with optimistic cache sync & server fallback
   const handleDeleteProduct = async (productId: string) => {
-    if (window.confirm("Are you sure you want to delete this product?")) {
+    const product = products.find((p) => p.id === productId);
+    const prodName = product?.name || "Product";
+    if (window.confirm(`Are you sure you want to delete "${prodName}"?`)) {
       try {
         setProducts((prev) => {
           const next = prev.filter((p) => p.id !== productId);
@@ -1778,12 +2051,217 @@ function AdminDashboard() {
           } catch {}
           return next;
         });
-        await deleteDoc(doc(db, "products", productId));
-        showNotification("success", "Product deleted successfully");
+
+        // 1. Try Firestore client SDK
+        try {
+          await deleteDoc(doc(db, "products", productId));
+        } catch (fsErr) {
+          console.warn("[Product Delete] Firestore direct delete notice:", fsErr);
+        }
+
+        // 2. Server API sync
+        await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+          method: "DELETE"
+        }).catch(() => {});
+
+        showNotification("success", `Product "${prodName}" deleted successfully`);
       } catch (err: any) {
         showNotification("error", "Delete failed: " + err.message);
         fetchProducts(true);
       }
+    }
+  };
+
+  // Open Offer Modal for a product
+  const openOfferModal = (product: Product) => {
+    setProductForOffer(product);
+    setOfferForm({
+      offerType: product.offerType || "percentage",
+      offerValue: product.offerValue !== undefined ? String(product.offerValue) : "",
+      offerStartDate: product.offerStartDate ? product.offerStartDate.slice(0, 16) : "",
+      offerEndDate: product.offerEndDate ? product.offerEndDate.slice(0, 16) : "",
+      offerEnabled: product.offerEnabled !== false
+    });
+    setShowOfferModal(true);
+  };
+
+  // Save / Update Offer on a product
+  const handleSaveOffer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!productForOffer || isSavingOffer) return;
+
+    const offerValue = Number(offerForm.offerValue);
+    if (isNaN(offerValue) || offerValue <= 0) {
+      showNotification("error", "Discount value must be greater than 0.");
+      return;
+    }
+
+    if (offerForm.offerType === "percentage" && (offerValue < 1 || offerValue > 99)) {
+      showNotification("error", "Percentage discount must be between 1% and 99%.");
+      return;
+    }
+
+    if (offerForm.offerType === "fixed" && offerValue >= productForOffer.price) {
+      showNotification("error", `Fixed discount cannot exceed the original price of ₹${productForOffer.price}.`);
+      return;
+    }
+
+    // Auto-calculate final offer price
+    let calculatedPrice = productForOffer.price;
+    if (offerForm.offerType === "percentage") {
+      calculatedPrice = Math.max(0, Math.round(productForOffer.price * (1 - offerValue / 100)));
+    } else {
+      calculatedPrice = Math.max(0, Math.round(productForOffer.price - offerValue));
+    }
+
+    if (calculatedPrice < 0) {
+      showNotification("error", "Final offer price cannot be negative.");
+      return;
+    }
+
+    setIsSavingOffer(true);
+    try {
+      const offerPayload = {
+        isOffer: true,
+        offerType: offerForm.offerType,
+        offerValue,
+        offerPrice: calculatedPrice,
+        offerStartDate: offerForm.offerStartDate ? new Date(offerForm.offerStartDate).toISOString() : null,
+        offerEndDate: offerForm.offerEndDate ? new Date(offerForm.offerEndDate).toISOString() : null,
+        offerEnabled: Boolean(offerForm.offerEnabled)
+      };
+
+      // 1. Try Firestore client SDK
+      try {
+        await updateDoc(doc(db, "products", productForOffer.id), offerPayload);
+      } catch (fsErr) {
+        console.warn("[Offer Save] Direct Firestore update notice:", fsErr);
+      }
+
+      // 2. Server API sync / fallback
+      await fetch(`/api/products/${encodeURIComponent(productForOffer.id)}/offer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(offerPayload)
+      }).catch(() => {});
+
+      // Update state and local storage immediately
+      setProducts((prev) => {
+        const next = prev.map((p) =>
+          p.id === productForOffer.id ? { ...p, ...offerPayload } : p
+        );
+        try {
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
+      showNotification(
+        "success",
+        `Offer configured for "${productForOffer.name}": ₹${productForOffer.price} ➔ ₹${calculatedPrice} (${offerForm.offerType === "percentage" ? `${offerValue}% OFF` : `₹${offerValue} OFF`})`
+      );
+      setShowOfferModal(false);
+      setProductForOffer(null);
+    } catch (err: any) {
+      showNotification("error", "Failed to save offer: " + err.message);
+    } finally {
+      setIsSavingOffer(false);
+    }
+  };
+
+  // Remove Offer from a product
+  const handleRemoveOffer = async (productId: string) => {
+    const product = products.find((p) => p.id === productId);
+    if (!product) return;
+
+    if (
+      window.confirm(
+        `Remove offer from "${product.name}"? The product will remain in your catalog at regular price ₹${product.price}.`
+      )
+    ) {
+      try {
+        const resetPayload = {
+          isOffer: false,
+          offerType: undefined,
+          offerValue: undefined,
+          offerPrice: undefined,
+          offerStartDate: null,
+          offerEndDate: null,
+          offerEnabled: false
+        };
+
+        // 1. Try Firestore client SDK
+        try {
+          await updateDoc(doc(db, "products", productId), {
+            isOffer: false,
+            offerEnabled: false,
+            offerPrice: product.price
+          });
+        } catch (fsErr) {
+          console.warn("[Offer Remove] Direct Firestore update notice:", fsErr);
+        }
+
+        // 2. Server API sync
+        await fetch(`/api/products/${encodeURIComponent(productId)}/offer`, {
+          method: "DELETE"
+        }).catch(() => {});
+
+        setProducts((prev) => {
+          const next = prev.map((p) =>
+            p.id === productId ? { ...p, ...resetPayload } : p
+          );
+          try {
+            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+
+        showNotification("success", `Offer removed from "${product.name}". Regular price ₹${product.price} restored.`);
+      } catch (err: any) {
+        showNotification("error", "Error removing offer: " + err.message);
+      }
+    }
+  };
+
+  // Quick toggle Enable/Disable Offer
+  const handleToggleOfferEnabled = async (productId: string, currentEnabled: boolean) => {
+    const nextEnabled = !currentEnabled;
+    const product = products.find((p) => p.id === productId);
+    if (!product) return;
+
+    try {
+      setProducts((prev) => {
+        const next = prev.map((p) =>
+          p.id === productId ? { ...p, offerEnabled: nextEnabled } : p
+        );
+        try {
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
+      // 1. Try Firestore client SDK
+      try {
+        await updateDoc(doc(db, "products", productId), {
+          offerEnabled: nextEnabled
+        });
+      } catch (fsErr) {
+        console.warn("[Toggle Offer] Direct Firestore update notice:", fsErr);
+      }
+
+      // 2. Server API sync
+      await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ offerEnabled: nextEnabled })
+      }).catch(() => {});
+
+      showNotification(
+        "success",
+        `Offer for "${product.name}" ${nextEnabled ? "Enabled 🟢" : "Disabled ⏸️"}`
+      );
+    } catch (err: any) {
+      showNotification("error", "Error updating offer status: " + err.message);
     }
   };
 
@@ -1857,6 +2335,150 @@ function AdminDashboard() {
         (p.category || "").toLowerCase().includes(q)
     );
   }, [products, searchQuery]);
+
+  // Memoized offer statistics and filtered offer products for Offer Management Tab
+  const offerStats = useMemo(() => {
+    let total = 0;
+    let active = 0;
+    let upcoming = 0;
+    let expired = 0;
+    let disabled = 0;
+
+    products.forEach((p) => {
+      if (p.isOffer) {
+        total += 1;
+        const pricing = getProductPricing(p);
+        if (pricing.offerStatus === "active") active += 1;
+        else if (pricing.offerStatus === "upcoming") upcoming += 1;
+        else if (pricing.offerStatus === "expired") expired += 1;
+        else if (pricing.offerStatus === "disabled") disabled += 1;
+      }
+    });
+
+    return { total, active, upcoming, expired, disabled };
+  }, [products]);
+
+  const filteredOffers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return products.filter((p) => {
+      if (!p.isOffer) return false;
+      const pricing = getProductPricing(p);
+
+      // Status filter
+      if (offerStatusFilter !== "all" && pricing.offerStatus !== offerStatusFilter) {
+        return false;
+      }
+
+      // Category filter
+      if (
+        offerCategoryFilter !== "all" &&
+        p.category.toLowerCase() !== offerCategoryFilter.toLowerCase()
+      ) {
+        return false;
+      }
+
+      // Search query
+      if (q) {
+        const matchName = (p.name || "").toLowerCase().includes(q);
+        const matchCat = (p.category || "").toLowerCase().includes(q);
+        if (!matchName && !matchCat) return false;
+      }
+
+      return true;
+    });
+  }, [products, searchQuery, offerStatusFilter, offerCategoryFilter]);
+
+  // Feature: Export current filtered orders to CSV for admin record-keeping
+  const exportOrdersToCSV = () => {
+    if (!filteredOrders || filteredOrders.length === 0) {
+      showNotification("error", "No orders to export in the current view or filter.");
+      return;
+    }
+
+    // RFC 4180 CSV standard escaper with spreadsheet formula sanitization
+    const escapeCsv = (val: any): string => {
+      if (val === null || val === undefined) return '""';
+      let str = String(val).replace(/\r\n/g, " ").replace(/[\r\n]/g, " ").trim();
+      // Security: prevent CSV injection (DDE attacks) in Excel/Google Sheets
+      if (/^[=+\-@\t\r]/.test(str)) {
+        str = "'" + str;
+      }
+      return `"${str.replace(/"/g, '""')}"`;
+    };
+
+    const headers = [
+      "Order ID",
+      "Order Date & Time",
+      "Customer Name",
+      "Customer Phone",
+      "Customer Address",
+      "Order Status",
+      "Total Amount (INR)",
+      "Payment Method",
+      "Items Count",
+      "Items Breakdown",
+      "Customer Instructions",
+      "Internal Admin Notes",
+      "Return Notes"
+    ];
+
+    const rows = filteredOrders.map((ord) => {
+      const itemsSummary = (ord.items || [])
+        .map(
+          (it: any) =>
+            `${it.name || "Item"} (x${it.qty || 1}${
+              it.price ? ` - Rs.${it.price * (it.qty || 1)}` : ""
+            })`
+        )
+        .join("; ");
+
+      const status = isReturnOrder(ord)
+        ? ord.status === "return_approved"
+          ? "RETURN APPROVED"
+          : ord.status === "return_rejected"
+          ? "RETURN REJECTED"
+          : "RETURN REQUEST"
+        : (ord.status || "pending").toUpperCase();
+
+      return [
+        escapeCsv(ord.id),
+        escapeCsv(formatFullDateTime(ord.createdAt)),
+        escapeCsv(ord.customerName || ""),
+        escapeCsv(ord.customerPhone || ""),
+        escapeCsv(ord.customerAddress || ""),
+        escapeCsv(status),
+        escapeCsv(Number(ord.total || 0).toFixed(2)),
+        escapeCsv(ord.paymentMethod || "N/A"),
+        escapeCsv((ord.items || []).length),
+        escapeCsv(itemsSummary),
+        escapeCsv(ord.notes || ord.customerNotes || ""),
+        escapeCsv(ord.internalNotes || ord.adminNotes || ""),
+        escapeCsv(ord.returnNotes || "")
+      ].join(",");
+    });
+
+    const csvContent = [headers.map((h) => `"${h}"`).join(","), ...rows].join("\r\n");
+
+    // Prepend UTF-8 BOM (\uFEFF) so Excel and spreadsheet apps correctly render Indian currency & unicode text
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filterSuffix = statusFilter !== "all" ? `-${statusFilter}` : "";
+    link.href = url;
+    link.download = `zypsomart-orders${filterSuffix}-${dateStr}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    showNotification(
+      "success",
+      `Exported ${filteredOrders.length} order${
+        filteredOrders.length === 1 ? "" : "s"
+      } to CSV successfully.`
+    );
+  };
 
   // View: Unauthenticated Sign In Screen
   if (!user) {
@@ -2112,6 +2734,38 @@ function AdminDashboard() {
           </button>
 
           <button
+            onClick={() => setActiveTab("offers")}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-xl font-semibold transition-all cursor-pointer ${
+              activeTab === "offers"
+                ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <BadgePercent size={19} />
+              <span>Offers & Deals</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              {offerStats.active > 0 && (
+                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-500 text-white animate-pulse">
+                  {offerStats.active} LIVE
+                </span>
+              )}
+              {offerStats.total > 0 && (
+                <span
+                  className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                    activeTab === "offers"
+                      ? "bg-white/25 text-white"
+                      : "bg-slate-100 text-slate-600"
+                  }`}
+                >
+                  {offerStats.total}
+                </span>
+              )}
+            </div>
+          </button>
+
+          <button
             onClick={() => setShowAlarmSettingsModal(true)}
             className="w-full flex items-center justify-between px-4 py-3 rounded-xl font-semibold transition-all cursor-pointer text-slate-600 hover:bg-slate-50 hover:text-slate-900"
           >
@@ -2303,11 +2957,13 @@ function AdminDashboard() {
                 </div>
                 <div className="min-w-0">
                   <h2 className="text-lg sm:text-2xl font-black text-slate-900 tracking-tight leading-tight truncate">
-                    {activeTab === "orders" ? "Orders" : "Products"}
+                    {activeTab === "orders" ? "Orders" : activeTab === "offers" ? "Offers & Deals" : "Products"}
                   </h2>
                   <p className="text-[11px] sm:text-xs text-slate-500 truncate">
                     {activeTab === "orders"
                       ? "Real-time order manager & updates"
+                      : activeTab === "offers"
+                      ? "Special discounts, promotional prices & flash deals"
                       : "Inventory & stock availability"}
                   </p>
                 </div>
@@ -2336,7 +2992,11 @@ function AdminDashboard() {
                 <input
                   type="text"
                   placeholder={
-                    activeTab === "orders" ? "Search orders..." : "Search products..."
+                    activeTab === "orders"
+                      ? "Search orders..."
+                      : activeTab === "offers"
+                      ? "Search offers or category..."
+                      : "Search products..."
                   }
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
@@ -2358,7 +3018,7 @@ function AdminDashboard() {
                 onClick={() => (activeTab === "orders" ? startOrdersSync() : fetchProducts(true))}
                 disabled={isLoadingProducts}
                 className="p-2 sm:p-2.5 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-50"
-                title={activeTab === "orders" ? "Reconnect / Refresh Orders" : "Refresh Product Catalog"}
+                title={activeTab === "orders" ? "Reconnect / Refresh Orders" : "Refresh Catalog & Offers"}
               >
                 <RefreshCcw
                   size={17}
@@ -2396,6 +3056,20 @@ function AdminDashboard() {
                 >
                   <Plus size={16} />
                   <span>Add Product</span>
+                </button>
+              )}
+
+              {activeTab === "offers" && (
+                <button
+                  onClick={() => {
+                    // Switch to products tab with a quick hint to pick a product or add to offer
+                    setActiveTab("products");
+                    showNotification("success", "Select any product below and click 'Add to Offer' or 'Edit Deal' to configure discounts.");
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold transition-all shadow-md shadow-amber-600/20 text-xs sm:text-sm shrink-0 cursor-pointer active:scale-95"
+                >
+                  <Plus size={16} />
+                  <span>Add to Offer</span>
                 </button>
               )}
             </div>
@@ -2500,31 +3174,32 @@ function AdminDashboard() {
                         />
                       </div>
 
-                      <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
-                          Category
-                        </label>
-                        {categories.length === 0 ? (
-                          <div className="w-full px-4 py-3 rounded-xl border border-slate-200 bg-slate-50 text-slate-500 font-medium text-sm flex items-center justify-between">
-                            <span>No category available</span>
-                          </div>
-                        ) : (
-                          <select
-                            required
-                            value={productForm.category}
-                            onChange={(e) =>
-                              setProductForm({ ...productForm, category: e.target.value })
-                            }
-                            className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none bg-white font-medium text-slate-700 text-sm cursor-pointer"
-                          >
-                            <option value="">Select Category</option>
-                            {categories.map((c) => (
-                              <option key={c.id} value={c.name}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                        )}
+                      <div className="col-span-1">
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
+                            Category
+                          </label>
+                          <span className="text-[10px] text-slate-400 font-medium">Type or select</span>
+                        </div>
+                        <input
+                          type="text"
+                          list="product-categories-presets"
+                          required
+                          placeholder="Type or pick category..."
+                          value={productForm.category}
+                          onChange={(e) =>
+                            setProductForm({ ...productForm, category: e.target.value })
+                          }
+                          className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-slate-800 text-sm bg-white"
+                        />
+                        <datalist id="product-categories-presets">
+                          {categories.map((c) => (
+                            <option key={c.id} value={c.name} />
+                          ))}
+                          {DEFAULT_PRESET_CATEGORIES.map((cat) => (
+                            <option key={`preset-${cat}`} value={cat} />
+                          ))}
+                        </datalist>
                       </div>
 
                       <div>
@@ -2624,6 +3299,8 @@ function AdminDashboard() {
                               <img
                                 src={formatImageUrl(productForm.image)}
                                 alt="Preview"
+                                loading="lazy"
+                                decoding="async"
                                 className="w-full h-full object-cover"
                                 referrerPolicy="no-referrer"
                                 onError={handleImgError}
@@ -2684,10 +3361,302 @@ function AdminDashboard() {
                       </button>
                       <button
                         type="submit"
-                        className="flex-1 py-3 bg-emerald-500 text-white font-bold rounded-xl hover:bg-emerald-600 transition-colors shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 cursor-pointer"
+                        disabled={isSavingProduct}
+                        className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 cursor-pointer"
                       >
-                        <Save size={18} />
-                        <span>{editingProduct ? "Update Product" : "Add Product"}</span>
+                        {isSavingProduct ? (
+                          <>
+                            <RefreshCcw size={18} className="animate-spin" />
+                            <span>Saving Product...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Save size={18} />
+                            <span>{editingProduct ? "Update Product" : "Add Product"}</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </form>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Offer Configuration Modal */}
+          <AnimatePresence>
+            {showOfferModal && productForOffer && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[200] flex items-center justify-center p-3 sm:p-4 bg-black/50 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, y: 20 }}
+                  animate={{ scale: 1, y: 0 }}
+                  className="bg-white rounded-2xl sm:rounded-3xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
+                >
+                  {/* Header */}
+                  <div className="p-4 sm:p-6 border-b border-amber-100 flex justify-between items-center bg-gradient-to-r from-amber-50 to-orange-50 shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shadow-sm">
+                        <BadgePercent size={22} />
+                      </div>
+                      <div>
+                        <h3 className="text-lg sm:text-xl font-bold text-slate-900 leading-tight">
+                          Configure Offer & Discount
+                        </h3>
+                        <p className="text-xs text-amber-800 font-medium truncate max-w-xs sm:max-w-sm">
+                          {productForOffer.name}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowOfferModal(false)}
+                      className="p-2 hover:bg-amber-200/50 rounded-full transition-colors cursor-pointer"
+                    >
+                      <X size={20} className="text-slate-500" />
+                    </button>
+                  </div>
+
+                  <form onSubmit={handleSaveOffer} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
+                    {/* Product Summary banner */}
+                    <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200 flex items-center gap-3">
+                      <div className="w-14 h-14 rounded-xl bg-white border border-slate-200 p-1 flex items-center justify-center shrink-0 overflow-hidden">
+                        {productForOffer.imageUrl || productForOffer.image ? (
+                          <img
+                            src={formatImageUrl(productForOffer.imageUrl || productForOffer.image || "")}
+                            alt={productForOffer.name}
+                            className="w-full h-full object-contain"
+                            onError={handleImgError}
+                          />
+                        ) : (
+                          <Package className="text-slate-300" size={24} />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                          {productForOffer.category} {productForOffer.unit ? `• ${productForOffer.unit}` : ""}
+                        </span>
+                        <h4 className="font-extrabold text-slate-900 text-sm truncate">
+                          {productForOffer.name}
+                        </h4>
+                        <div className="flex items-center gap-2 mt-0.5">
+                          <span className="text-xs font-semibold text-slate-500">Original Price:</span>
+                          <span className="text-sm font-black text-slate-900">₹{productForOffer.price}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Offer Type selector */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest mb-2">
+                        Offer Discount Type
+                      </label>
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setOfferForm({ ...offerForm, offerType: "percentage" })}
+                          className={`p-3 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
+                            offerForm.offerType === "percentage"
+                              ? "border-amber-500 bg-amber-50/80 text-amber-950 font-bold shadow-xs"
+                              : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                          }`}
+                        >
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                            offerForm.offerType === "percentage" ? "bg-amber-500 text-white" : "bg-slate-100 text-slate-500"
+                          }`}>
+                            <Percent size={16} />
+                          </div>
+                          <div className="text-left">
+                            <span className="text-xs font-bold block">Percentage (%)</span>
+                            <span className="text-[10px] text-slate-500 block">e.g. 20% OFF</span>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setOfferForm({ ...offerForm, offerType: "fixed" })}
+                          className={`p-3 rounded-xl border flex items-center gap-2.5 transition-all cursor-pointer ${
+                            offerForm.offerType === "fixed"
+                              ? "border-amber-500 bg-amber-50/80 text-amber-950 font-bold shadow-xs"
+                              : "border-slate-200 bg-white hover:bg-slate-50 text-slate-700"
+                          }`}
+                        >
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
+                            offerForm.offerType === "fixed" ? "bg-amber-500 text-white" : "bg-slate-100 text-slate-500"
+                          }`}>
+                            <IndianRupee size={16} />
+                          </div>
+                          <div className="text-left">
+                            <span className="text-xs font-bold block">Fixed Discount (₹)</span>
+                            <span className="text-[10px] text-slate-500 block">e.g. ₹25 OFF</span>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Discount Value Input */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest">
+                          {offerForm.offerType === "percentage" ? "Discount Percentage (%)" : "Flat Discount Amount (₹)"}
+                        </label>
+                        <span className="text-[11px] text-slate-400">
+                          {offerForm.offerType === "percentage" ? "1% to 99%" : `Max ₹${productForOffer.price - 1}`}
+                        </span>
+                      </div>
+                      <input
+                        type="number"
+                        step="any"
+                        required
+                        min="1"
+                        max={offerForm.offerType === "percentage" ? "99" : String(productForOffer.price - 1)}
+                        placeholder={offerForm.offerType === "percentage" ? "e.g. 20" : "e.g. 15"}
+                        value={offerForm.offerValue}
+                        onChange={(e) => setOfferForm({ ...offerForm, offerValue: e.target.value })}
+                        className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-amber-500 outline-none font-bold text-slate-800 text-base"
+                      />
+                    </div>
+
+                    {/* Live Calculation Preview Card */}
+                    {(() => {
+                      const val = Number(offerForm.offerValue);
+                      const orig = productForOffer.price;
+                      let finalP = orig;
+                      let savings = 0;
+                      let isValid = false;
+
+                      if (!isNaN(val) && val > 0) {
+                        if (offerForm.offerType === "percentage" && val < 100) {
+                          finalP = Math.max(0, Math.round(orig * (1 - val / 100)));
+                          savings = orig - finalP;
+                          isValid = true;
+                        } else if (offerForm.offerType === "fixed" && val < orig) {
+                          finalP = Math.max(0, Math.round(orig - val));
+                          savings = orig - finalP;
+                          isValid = true;
+                        }
+                      }
+
+                      return (
+                        <div className="bg-gradient-to-br from-emerald-50 via-teal-50/60 to-emerald-50 rounded-2xl p-4 border border-emerald-200/80 shadow-xs">
+                          <span className="text-[10px] font-black uppercase tracking-wider text-emerald-700 block mb-2">
+                            Live Offer Calculation
+                          </span>
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <span className="text-xs text-slate-500 block">Original Price</span>
+                              <span className="text-sm font-semibold text-slate-400 line-through">
+                                ₹{orig}
+                              </span>
+                            </div>
+                            <div className="text-center">
+                              <span className="text-xs text-slate-500 block">Discount</span>
+                              <span className="text-xs font-black text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
+                                {isValid
+                                  ? offerForm.offerType === "percentage"
+                                    ? `${val}% OFF`
+                                    : `₹${val} OFF`
+                                  : "—"}
+                              </span>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-xs font-bold text-emerald-800 block">Final Customer Price</span>
+                              <span className="text-2xl font-black text-emerald-600 font-sans">
+                                ₹{isValid ? finalP : orig}
+                              </span>
+                            </div>
+                          </div>
+                          {isValid && (
+                            <p className="mt-2 pt-2 border-t border-emerald-200/60 text-xs text-emerald-800 font-semibold flex items-center justify-between">
+                              <span>Customer saves on each item:</span>
+                              <span className="font-black text-emerald-700">₹{savings}</span>
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Optional Schedule Dates */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 mb-1 flex items-center gap-1">
+                          <Calendar size={13} className="text-slate-400" />
+                          <span>Start Date & Time (Optional)</span>
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={offerForm.offerStartDate}
+                          onChange={(e) => setOfferForm({ ...offerForm, offerStartDate: e.target.value })}
+                          className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-amber-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-bold text-slate-500 mb-1 flex items-center gap-1">
+                          <Calendar size={13} className="text-slate-400" />
+                          <span>End Date & Time (Optional)</span>
+                        </label>
+                        <input
+                          type="datetime-local"
+                          value={offerForm.offerEndDate}
+                          onChange={(e) => setOfferForm({ ...offerForm, offerEndDate: e.target.value })}
+                          className="w-full px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium text-slate-700 outline-none focus:ring-2 focus:ring-amber-500"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Enable / Disable Switch */}
+                    <div className="flex items-center justify-between p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+                      <div>
+                        <span className="text-xs font-bold text-slate-800 block">Offer Status</span>
+                        <span className="text-[11px] text-slate-500">
+                          {offerForm.offerEnabled
+                            ? "Active — Customer App will show discount badge & offer price"
+                            : "Disabled — Hidden from customers, regular price will be charged"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setOfferForm({ ...offerForm, offerEnabled: !offerForm.offerEnabled })}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                          offerForm.offerEnabled ? "bg-emerald-500" : "bg-slate-300"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            offerForm.offerEnabled ? "translate-x-6" : "translate-x-1"
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex gap-3 pt-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowOfferModal(false)}
+                        className="flex-1 py-3 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-50 transition-colors cursor-pointer text-sm"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={isSavingOffer}
+                        className="flex-1 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2 cursor-pointer text-sm"
+                      >
+                        {isSavingOffer ? (
+                          <>
+                            <RefreshCcw size={16} className="animate-spin" />
+                            <span>Saving Offer...</span>
+                          </>
+                        ) : (
+                          <>
+                            <BadgePercent size={18} />
+                            <span>Save Offer</span>
+                          </>
+                        )}
                       </button>
                     </div>
                   </form>
@@ -3207,7 +4176,7 @@ function AdminDashboard() {
                     <button
                       onClick={() => {
                         setStatusFilter("pending");
-                        setSearchQuery("");
+                        handleSetSearch("");
                       }}
                       className="px-4 py-2 bg-white text-red-700 hover:bg-slate-100 font-black text-xs rounded-xl shadow-xs transition-all cursor-pointer"
                     >
@@ -3280,14 +4249,26 @@ function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Order Status Filters */}
+              {/* Order Status Filters & Actions */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-b border-slate-100 pb-4">
-                <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
-                  <span>Recent Activity Orders</span>
-                  <span className="text-xs font-extrabold bg-slate-200 text-slate-700 px-2.5 py-0.5 rounded-full">
-                    {filteredOrders.length} Total
-                  </span>
-                </h3>
+                <div className="flex items-center gap-2.5 sm:gap-3 flex-wrap">
+                  <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                    <span>Recent Activity Orders</span>
+                    <span className="text-xs font-extrabold bg-slate-200 text-slate-700 px-2.5 py-0.5 rounded-full">
+                      {filteredOrders.length} Total
+                    </span>
+                  </h3>
+
+                  <button
+                    onClick={exportOrdersToCSV}
+                    disabled={filteredOrders.length === 0}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-100 text-emerald-800 disabled:text-slate-400 font-bold text-xs rounded-xl border border-emerald-200/80 disabled:border-slate-200 shadow-2xs transition-all cursor-pointer disabled:cursor-not-allowed shrink-0 active:scale-95"
+                    title={`Export ${filteredOrders.length} filtered orders to CSV file`}
+                  >
+                    <Download size={13} className="stroke-[2.5]" />
+                    <span>Export CSV ({filteredOrders.length})</span>
+                  </button>
+                </div>
 
                 <div className="flex flex-wrap gap-1.5 overflow-x-auto pb-1 sm:pb-0">
                   {["all", "pending", "accepted", "delivered", "cancelled", "returns"].map((key) => {
@@ -3736,9 +4717,342 @@ function AdminDashboard() {
                   })}
                 </div>
               )}
+
+              {/* Scalable Order Pagination / Load More */}
+              {orders.length >= orderLimit && (
+                <div className="mt-8 mb-4 flex justify-center">
+                  <button
+                    onClick={() => setOrderLimit((prev) => prev + 50)}
+                    className="flex items-center gap-2 px-6 py-2.5 bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-700 font-extrabold text-xs rounded-xl border border-slate-200 hover:border-emerald-300 shadow-xs hover:shadow transition-all cursor-pointer active:scale-95"
+                  >
+                    <RefreshCcw size={14} />
+                    <span>Load Older Orders (Showing {orders.length}, +50)</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : activeTab === "offers" ? (
+            /* TAB 3: OFFER & DISCOUNT MANAGEMENT */
+            <div className="space-y-6">
+              {/* Offers Summary Metric Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+                <div className="bg-white rounded-2xl p-4 border border-slate-200/90 shadow-xs flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
+                      Total Offers
+                    </p>
+                    <h4 className="text-xl sm:text-2xl font-black text-slate-900">
+                      {offerStats.total}
+                    </h4>
+                    <span className="text-[10px] text-slate-500 font-medium">Configured deals</span>
+                  </div>
+                  <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                    <BadgePercent size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-4 border border-emerald-200/90 shadow-xs flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] sm:text-xs font-bold text-emerald-700 uppercase tracking-wider mb-1">
+                      Live on Store
+                    </p>
+                    <h4 className="text-xl sm:text-2xl font-black text-emerald-600">
+                      {offerStats.active}
+                    </h4>
+                    <span className="text-[10px] text-emerald-700 font-semibold flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      Active now
+                    </span>
+                  </div>
+                  <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center shrink-0">
+                    <Flame size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-4 border border-slate-200/90 shadow-xs flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] sm:text-xs font-bold text-sky-600 uppercase tracking-wider mb-1">
+                      Upcoming
+                    </p>
+                    <h4 className="text-xl sm:text-2xl font-black text-sky-600">
+                      {offerStats.upcoming}
+                    </h4>
+                    <span className="text-[10px] text-slate-500 font-medium">Scheduled deals</span>
+                  </div>
+                  <div className="w-10 h-10 rounded-xl bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
+                    <Clock size={20} />
+                  </div>
+                </div>
+
+                <div className="bg-white rounded-2xl p-4 border border-slate-200/90 shadow-xs flex items-center justify-between">
+                  <div>
+                    <p className="text-[10px] sm:text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">
+                      Disabled / Expired
+                    </p>
+                    <h4 className="text-xl sm:text-2xl font-black text-slate-700">
+                      {offerStats.disabled + offerStats.expired}
+                    </h4>
+                    <span className="text-[10px] text-slate-500 font-medium">
+                      {offerStats.expired} expired, {offerStats.disabled} paused
+                    </span>
+                  </div>
+                  <div className="w-10 h-10 rounded-xl bg-slate-50 text-slate-500 flex items-center justify-center shrink-0">
+                    <Tag size={20} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Offer Filters Bar */}
+              <div className="bg-white rounded-2xl p-4 border border-slate-200/90 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
+                {/* Status Tabs */}
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-1 md:pb-0">
+                  {(
+                    [
+                      { id: "all", label: "All Offers", count: offerStats.total },
+                      { id: "active", label: "Active Now 🔥", count: offerStats.active },
+                      { id: "upcoming", label: "Upcoming 🕒", count: offerStats.upcoming },
+                      { id: "expired", label: "Expired", count: offerStats.expired },
+                      { id: "disabled", label: "Disabled", count: offerStats.disabled }
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setOfferStatusFilter(tab.id)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+                        offerStatusFilter === tab.id
+                          ? "bg-amber-500 text-white shadow-xs"
+                          : "bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200"
+                      }`}
+                    >
+                      <span>{tab.label}</span>
+                      <span
+                        className={`text-[10px] px-1.5 py-0.2 rounded-full font-black ${
+                          offerStatusFilter === tab.id
+                            ? "bg-white/20 text-white"
+                            : "bg-slate-200 text-slate-600"
+                        }`}
+                      >
+                        {tab.count}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                {/* Category filter dropdown */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-500 shrink-0">Category:</span>
+                  <select
+                    value={offerCategoryFilter}
+                    onChange={(e) => setOfferCategoryFilter(e.target.value)}
+                    className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                  >
+                    <option value="all">All Categories</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.name}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Offers Grid */}
+              {filteredOffers.length === 0 ? (
+                <div className="bg-white rounded-3xl p-12 text-center border border-dashed border-slate-200 shadow-xs">
+                  <div className="w-16 h-16 rounded-2xl bg-amber-50 text-amber-500 flex items-center justify-center mx-auto mb-4">
+                    <BadgePercent size={32} />
+                  </div>
+                  <h3 className="text-lg font-bold text-slate-900 mb-1">
+                    {offerStats.total === 0
+                      ? "No Products Currently on Offer"
+                      : "No Offers Found for Selected Filter"}
+                  </h3>
+                  <p className="text-slate-500 text-xs max-w-md mx-auto mb-6">
+                    {offerStats.total === 0
+                      ? "You can easily add discounts to any product. Open the Products tab, find a product, and click 'Add to Offer'."
+                      : "Try switching the status filter or category filter above to see other configured deals."}
+                  </p>
+                  <button
+                    onClick={() => setActiveTab("products")}
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-md transition-all cursor-pointer inline-flex items-center gap-2 active:scale-95"
+                  >
+                    <Plus size={16} />
+                    <span>Go to Products Catalog to Add Offers</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                  {filteredOffers.map((prod) => {
+                    const pricing = getProductPricing(prod);
+                    const isLive = pricing.offerStatus === "active";
+                    const isUpcoming = pricing.offerStatus === "upcoming";
+                    const isExpired = pricing.offerStatus === "expired";
+                    const isDisabled = pricing.offerStatus === "disabled";
+
+                    return (
+                      <div
+                        key={prod.id}
+                        className={`bg-white rounded-2xl border shadow-xs hover:shadow-md transition-all duration-200 overflow-hidden flex flex-col ${
+                          isLive
+                            ? "border-amber-200 ring-1 ring-amber-100"
+                            : "border-slate-200 opacity-90"
+                        }`}
+                      >
+                        {/* Image & Badges */}
+                        <div className="relative h-44 bg-slate-50 flex items-center justify-center p-3 border-b border-slate-100">
+                          {prod.imageUrl || prod.image ? (
+                            <img
+                              src={formatImageUrl(prod.imageUrl || prod.image || "")}
+                              alt={prod.name}
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-contain"
+                              referrerPolicy="no-referrer"
+                              onError={handleImgError}
+                            />
+                          ) : (
+                            <Package className="text-slate-300" size={40} />
+                          )}
+
+                          {/* Discount Pill Top Left */}
+                          <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 flex-wrap">
+                            <span className="bg-amber-500 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider flex items-center gap-1">
+                              <Sparkles size={11} />
+                              <span>{pricing.discountText}</span>
+                            </span>
+                            <span className="bg-white/90 backdrop-blur-xs text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md border border-slate-100 uppercase tracking-wider">
+                              {prod.category}
+                            </span>
+                          </div>
+
+                          {/* Status Pill Top Right */}
+                          <div className="absolute top-2.5 right-2.5">
+                            {isLive && (
+                              <span className="bg-emerald-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider flex items-center gap-1 animate-pulse">
+                                <span className="w-1.5 h-1.5 rounded-full bg-white" />
+                                <span>LIVE</span>
+                              </span>
+                            )}
+                            {isUpcoming && (
+                              <span className="bg-sky-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider">
+                                UPCOMING
+                              </span>
+                            )}
+                            {isExpired && (
+                              <span className="bg-red-600 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider">
+                                EXPIRED
+                              </span>
+                            )}
+                            {isDisabled && (
+                              <span className="bg-slate-400 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider">
+                                DISABLED
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Details */}
+                        <div className="p-4 flex-1 flex flex-col">
+                          <h4 className="font-bold text-slate-900 text-sm leading-tight truncate mb-1" title={prod.name}>
+                            {prod.name}
+                          </h4>
+                          {prod.unit && (
+                            <span className="text-[11px] text-slate-500 font-medium mb-3">
+                              Unit: <span className="font-bold text-emerald-700">{prod.unit}</span>
+                            </span>
+                          )}
+
+                          {/* Price Comparison */}
+                          <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-200/80 mb-3">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[11px] text-slate-400 line-through">
+                                Regular: ₹{pricing.originalPrice}
+                              </span>
+                              <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                Save ₹{pricing.savings}
+                              </span>
+                            </div>
+                            <div className="flex items-baseline gap-1">
+                              <span className="text-xl font-black text-emerald-600 font-sans">
+                                ₹{pricing.finalPrice}
+                              </span>
+                              <span className="text-[11px] font-bold text-slate-500">
+                                / {prod.unit || "item"}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Date Schedule info if configured */}
+                          {(prod.offerStartDate || prod.offerEndDate) && (
+                            <div className="text-[10px] text-slate-500 space-y-0.5 mb-3 bg-amber-50/60 p-2 rounded-lg border border-amber-100">
+                              {prod.offerStartDate && (
+                                <p className="truncate">
+                                  <span className="font-bold text-slate-700">Starts:</span>{" "}
+                                  {new Date(prod.offerStartDate).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                                </p>
+                              )}
+                              {prod.offerEndDate && (
+                                <p className="truncate">
+                                  <span className="font-bold text-slate-700">Ends:</span>{" "}
+                                  {new Date(prod.offerEndDate).toLocaleString([], { dateStyle: "short", timeStyle: "short" })}
+                                </p>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Actions */}
+                          <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                            {/* Quick Enable/Disable Toggle */}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleOfferEnabled(prod.id, Boolean(prod.offerEnabled))}
+                              className="flex items-center gap-1.5 text-xs font-bold text-slate-600 hover:text-slate-900 cursor-pointer"
+                              title="Toggle offer on/off"
+                            >
+                              <div
+                                className={`w-8 h-4.5 rounded-full transition-colors relative flex items-center ${
+                                  prod.offerEnabled ? "bg-emerald-500" : "bg-slate-300"
+                                }`}
+                              >
+                                <span
+                                  className={`w-3.5 h-3.5 rounded-full bg-white transition-transform ${
+                                    prod.offerEnabled ? "translate-x-4" : "translate-x-0.5"
+                                  }`}
+                                />
+                              </div>
+                              <span className="text-[11px]">
+                                {prod.offerEnabled ? "Enabled" : "Paused"}
+                              </span>
+                            </button>
+
+                            <div className="flex items-center gap-1">
+                              {/* Edit Offer button */}
+                              <button
+                                onClick={() => openOfferModal(prod)}
+                                className="p-1.5 rounded-lg text-slate-600 hover:text-amber-700 hover:bg-amber-50 transition-colors cursor-pointer"
+                                title="Edit Offer Values"
+                              >
+                                <Pen size={15} />
+                              </button>
+                              {/* Remove from Offer button */}
+                              <button
+                                onClick={() => handleRemoveOffer(prod.id)}
+                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                                title="Remove product from Offer list (preserves catalog item)"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ) : (
-            /* TAB 2: PRODUCTS MANAGEMENT */
+            /* TAB 2: PRODUCTS MANAGEMENT (With Offer Badges and Offer Buttons) */
             <div>
               {filteredProducts.length === 0 ? (
                 <div className="bg-white rounded-2xl p-12 text-center border border-dashed border-slate-300">
@@ -3752,127 +5066,208 @@ function AdminDashboard() {
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3.5 sm:gap-5">
-                  {filteredProducts.map((prod) => (
-                    <motion.div
-                      key={prod.id}
-                      layout
-                      initial={{ opacity: 0, scale: 0.95 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className={`bg-white rounded-2xl shadow-xs border overflow-hidden transition-all duration-300 group hover:shadow-md ${
-                        prod.isAvailable
-                          ? "border-slate-200"
-                          : "grayscale opacity-75 border-slate-200"
-                      }`}
-                    >
-                      {/* Product Image: Medium Size */}
-                      <div className="relative h-40 sm:h-44 w-full bg-slate-50 flex items-center justify-center p-2.5 overflow-hidden border-b border-slate-100">
-                        {prod.imageUrl || prod.image ? (
-                          <img
-                            src={formatImageUrl(prod.imageUrl || prod.image || "")}
-                            alt={prod.name}
-                            className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
-                            referrerPolicy="no-referrer"
-                            onError={handleImgError}
-                          />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center text-slate-300">
-                            <Package size={38} />
-                          </div>
-                        )}
+                  {filteredProducts.map((prod) => {
+                    const pricing = getProductPricing(prod);
 
-                        {!prod.isAvailable && (
-                          <div className="absolute inset-0 bg-slate-900/40 flex items-center justify-center backdrop-blur-[2px]">
-                            <span className="bg-white text-slate-900 px-3 py-1 rounded-full font-black text-[11px] uppercase tracking-wider shadow-lg">
-                              Unavailable
-                            </span>
-                          </div>
-                        )}
-
-                        <div className="absolute top-2.5 left-2.5 flex items-center gap-1 flex-wrap">
-                          <span className="bg-white/95 backdrop-blur-sm text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs border border-slate-100">
-                            {prod.category}
-                          </span>
-                          {prod.unit && (
-                            <span className="bg-emerald-600/90 backdrop-blur-sm text-[10px] font-bold text-white px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs">
-                              {prod.unit}
-                            </span>
+                    return (
+                      <motion.div
+                        key={prod.id}
+                        layout
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        className={`bg-white rounded-2xl shadow-xs border overflow-hidden transition-all duration-300 group hover:shadow-md flex flex-col ${
+                          prod.isAvailable
+                            ? prod.isOffer && pricing.hasActiveOffer
+                              ? "border-amber-300 ring-1 ring-amber-200/60"
+                              : "border-slate-200"
+                            : "grayscale opacity-75 border-slate-200"
+                        }`}
+                      >
+                        {/* Product Image: Medium Size with lazy-loading & async decoding */}
+                        <div className="relative h-40 sm:h-44 w-full bg-slate-50 flex items-center justify-center p-2.5 overflow-hidden border-b border-slate-100 shrink-0">
+                          {prod.imageUrl || prod.image ? (
+                            <img
+                              src={formatImageUrl(prod.imageUrl || prod.image || "")}
+                              alt={prod.name}
+                              loading="lazy"
+                              decoding="async"
+                              className="w-full h-full object-contain group-hover:scale-105 transition-transform duration-300"
+                              referrerPolicy="no-referrer"
+                              onError={handleImgError}
+                            />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center text-slate-300">
+                              <Package size={38} />
+                            </div>
                           )}
-                        </div>
-                      </div>
 
-                      <div className="p-4 sm:p-4.5">
-                        <div className="flex justify-between items-start gap-2 mb-2">
-                          <div className="flex-1 min-w-0">
-                            <h3 className="font-bold text-slate-900 leading-tight truncate" title={prod.name}>
-                              {prod.name}
-                            </h3>
+                          {!prod.isAvailable && (
+                            <div className="absolute inset-0 bg-slate-900/40 flex items-center justify-center backdrop-blur-[2px]">
+                              <span className="bg-white text-slate-900 px-3 py-1 rounded-full font-black text-[11px] uppercase tracking-wider shadow-lg">
+                                Unavailable
+                              </span>
+                            </div>
+                          )}
+
+                          <div className="absolute top-2.5 left-2.5 flex items-center gap-1 flex-wrap">
+                            <span className="bg-white/95 backdrop-blur-sm text-[10px] font-bold text-slate-700 px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs border border-slate-100">
+                              {prod.category}
+                            </span>
                             {prod.unit && (
-                              <span className="inline-block mt-0.5 text-[11px] font-semibold text-slate-500">
-                                Unit: <span className="font-bold text-emerald-700">{prod.unit}</span>
+                              <span className="bg-emerald-600/90 backdrop-blur-sm text-[10px] font-bold text-white px-2 py-0.5 rounded-md uppercase tracking-wider shadow-xs">
+                                {prod.unit}
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              onClick={() => openEditProductModal(prod)}
-                              className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors cursor-pointer"
-                              title="Edit Product (Name, Unit, Price, etc.)"
-                            >
-                              <Pen size={15} />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteProduct(prod.id)}
-                              className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors cursor-pointer"
-                              title="Delete Product"
-                            >
-                              <Trash2 size={15} />
-                            </button>
+
+                          {/* Offer Status Pill Top Right */}
+                          <div className="absolute top-2.5 right-2.5">
+                            {prod.isOffer ? (
+                              pricing.hasActiveOffer ? (
+                                <span className="bg-gradient-to-r from-amber-500 to-orange-500 text-white text-[10px] font-black px-2 py-0.5 rounded-md shadow-xs uppercase tracking-wider flex items-center gap-1 animate-pulse">
+                                  <Flame size={10} />
+                                  <span>{pricing.discountText}</span>
+                                </span>
+                              ) : (
+                                <span className="bg-slate-200 text-slate-700 text-[10px] font-bold px-1.5 py-0.5 rounded-md border border-slate-300">
+                                  Offer {pricing.offerStatus}
+                                </span>
+                              )
+                            ) : (
+                              <span className="bg-white/80 backdrop-blur-xs text-[9px] font-semibold text-slate-400 px-1.5 py-0.5 rounded-md border border-slate-100">
+                                Regular
+                              </span>
+                            )}
                           </div>
                         </div>
 
-                        <div className="flex items-baseline gap-1 mb-2">
-                          <span className="text-emerald-600 font-extrabold text-lg">₹{prod.price}</span>
-                          {prod.unit && (
-                            <span className="text-xs font-semibold text-slate-400">/ {prod.unit}</span>
-                          )}
-                        </div>
-
-                        <p className="text-xs text-slate-500 mb-4 line-clamp-1">
-                          {prod.description || "No description available"}
-                        </p>
-
-                        <div className="flex items-center justify-between pt-4 border-t border-slate-50">
-                          <div className="flex flex-col">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                              Status
-                            </span>
-                            <span
-                              className={`text-xs font-bold ${
-                                prod.isAvailable ? "text-emerald-500" : "text-slate-400"
-                              }`}
-                            >
-                              {prod.isAvailable ? "Available" : "Unavailable"}
-                            </span>
+                        <div className="p-4 sm:p-4.5 flex-1 flex flex-col">
+                          <div className="flex justify-between items-start gap-2 mb-2">
+                            <div className="flex-1 min-w-0">
+                              <h3 className="font-bold text-slate-900 leading-tight truncate" title={prod.name}>
+                                {prod.name}
+                              </h3>
+                              {prod.unit && (
+                                <span className="inline-block mt-0.5 text-[11px] font-semibold text-slate-500">
+                                  Unit: <span className="font-bold text-emerald-700">{prod.unit}</span>
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                onClick={() => openEditProductModal(prod)}
+                                className="p-1.5 hover:bg-emerald-50 rounded-lg text-slate-400 hover:text-emerald-600 transition-colors cursor-pointer"
+                                title="Edit Product (Name, Unit, Price, etc.)"
+                              >
+                                <Pen size={15} />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteProduct(prod.id)}
+                                className="p-1.5 hover:bg-red-50 rounded-lg text-slate-400 hover:text-red-500 transition-colors cursor-pointer"
+                                title="Delete Product"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
                           </div>
 
-                          <button
-                            onClick={() =>
-                              handleToggleProductAvailability(prod.id, prod.isAvailable)
-                            }
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 cursor-pointer ${
-                              prod.isAvailable ? "bg-emerald-500" : "bg-slate-200"
-                            }`}
-                          >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                prod.isAvailable ? "translate-x-6" : "translate-x-1"
+                          {/* Pricing block: shows offer price + original strikethrough if offer is active */}
+                          <div className="mb-2">
+                            {prod.isOffer && pricing.hasActiveOffer ? (
+                              <div className="flex items-baseline gap-2">
+                                <span className="text-emerald-600 font-black text-xl font-sans">
+                                  ₹{pricing.finalPrice}
+                                </span>
+                                <span className="text-xs font-semibold text-slate-400 line-through">
+                                  ₹{pricing.originalPrice}
+                                </span>
+                                {prod.unit && (
+                                  <span className="text-xs font-semibold text-slate-400">/ {prod.unit}</span>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="flex items-baseline gap-1">
+                                <span className="text-emerald-600 font-extrabold text-lg">₹{prod.price}</span>
+                                {prod.unit && (
+                                  <span className="text-xs font-semibold text-slate-400">/ {prod.unit}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+
+                          <p className="text-xs text-slate-500 mb-3 line-clamp-1">
+                            {prod.description || "No description available"}
+                          </p>
+
+                          {/* Offer Action Button */}
+                          <div className="mt-auto pt-2 border-t border-slate-100 flex items-center justify-between gap-1 mb-2">
+                            {prod.isOffer ? (
+                              <div className="flex items-center justify-between w-full gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => openOfferModal(prod)}
+                                  className="flex-1 py-1 px-2 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-extrabold rounded-lg border border-amber-200 transition-all flex items-center justify-center gap-1 cursor-pointer"
+                                  title="Edit Offer Discount & Validity"
+                                >
+                                  <BadgePercent size={13} />
+                                  <span>Edit Deal</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveOffer(prod.id)}
+                                  className="p-1 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                                  title="Remove from Offer"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => openOfferModal(prod)}
+                                className="w-full py-1 px-2 bg-slate-50 hover:bg-amber-50 hover:text-amber-800 hover:border-amber-200 text-slate-600 text-[11px] font-bold rounded-lg border border-slate-200 transition-all flex items-center justify-center gap-1 cursor-pointer"
+                                title="Add this product to Offer / Discount"
+                              >
+                                <Plus size={12} />
+                                <span>Add to Offer</span>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Stock status toggle */}
+                          <div className="flex items-center justify-between pt-2 border-t border-slate-50">
+                            <div className="flex flex-col">
+                              <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">
+                                Status
+                              </span>
+                              <span
+                                className={`text-[11px] font-bold ${
+                                  prod.isAvailable ? "text-emerald-500" : "text-slate-400"
+                                }`}
+                              >
+                                {prod.isAvailable ? "Available" : "Unavailable"}
+                              </span>
+                            </div>
+
+                            <button
+                              onClick={() =>
+                                handleToggleProductAvailability(prod.id, prod.isAvailable)
+                              }
+                              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 cursor-pointer ${
+                                prod.isAvailable ? "bg-emerald-500" : "bg-slate-200"
                               }`}
-                            />
-                          </button>
+                            >
+                              <span
+                                className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                                  prod.isAvailable ? "translate-x-4.5" : "translate-x-0.5"
+                                }`}
+                              />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    </motion.div>
-                  ))}
+                      </motion.div>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -3972,6 +5367,28 @@ function AdminDashboard() {
             className={activeTab === "products" ? "stroke-[2.5px]" : "stroke-2"}
           />
           <span className="text-[10px] mt-1">Products</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab("offers")}
+          className={`flex flex-col items-center justify-center flex-1 py-1 min-h-[48px] transition-all cursor-pointer relative ${
+            activeTab === "offers"
+              ? "text-emerald-600 font-extrabold"
+              : "text-slate-500 hover:text-slate-800 font-medium"
+          }`}
+        >
+          <div className="relative">
+            <BadgePercent
+              size={20}
+              className={activeTab === "offers" ? "stroke-[2.5px]" : "stroke-2"}
+            />
+            {offerStats.active > 0 && (
+              <span className="absolute -top-1.5 -right-2 bg-amber-500 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center animate-pulse shadow-xs">
+                {offerStats.active}
+              </span>
+            )}
+          </div>
+          <span className="text-[10px] mt-1">Offers</span>
         </button>
 
         <button

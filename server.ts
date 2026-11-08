@@ -23,6 +23,15 @@ import {
   configureServiceAccountController
 } from "./server/fcmController.js";
 import { startServerOrderWatcher } from "./server/orderWatcher.js";
+import {
+  listProductsController,
+  createProductController,
+  updateProductController,
+  deleteProductController,
+  setProductOfferController,
+  removeProductOfferController,
+  listCategoriesController
+} from "./server/productController.js";
 
 async function startServer() {
   const app = express();
@@ -49,6 +58,18 @@ async function startServer() {
       timestamp: new Date().toISOString()
     });
   });
+
+  // Product CRUD & Offer Management API
+  app.get("/api/products", listProductsController);
+  app.post("/api/products", createProductController);
+  app.put("/api/products/:id", updateProductController);
+  app.patch("/api/products/:id", updateProductController);
+  app.delete("/api/products/:id", deleteProductController);
+  app.post("/api/products/:id/offer", setProductOfferController);
+  app.delete("/api/products/:id/offer", removeProductOfferController);
+
+  // Category API with fallback presets
+  app.get("/api/categories", listCategoriesController);
 
   // Shop Open / Closed Status API (for Admin & Customer Apps)
   app.get("/api/shop/status", getShopStatusController);

@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
-import { initializeFirestore, setLogLevel } from "firebase/firestore";
+import { initializeFirestore, getFirestore, setLogLevel, Firestore } from "firebase/firestore";
 
 export const firebaseConfig = {
   apiKey: "AIzaSyDxztzPoCTCzckaEsvupHJOyCHEhAxr9DU",
@@ -15,9 +15,18 @@ export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getA
 export const auth = getAuth(app);
 
 // Silence internal verbose/transient connection warnings
-setLogLevel("silent");
+try {
+  setLogLevel("silent");
+} catch {}
 
-export const db = initializeFirestore(app, {
-  experimentalAutoDetectLongPolling: true,
-  ignoreUndefinedProperties: true
-});
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = initializeFirestore(app, {
+    experimentalAutoDetectLongPolling: true,
+    ignoreUndefinedProperties: true
+  });
+} catch {
+  firestoreInstance = getFirestore(app);
+}
+
+export const db = firestoreInstance;

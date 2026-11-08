@@ -31,16 +31,24 @@ export async function getFCMInstance() {
 }
 
 export function isNotificationSupported(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    "Notification" in window &&
-    "serviceWorker" in navigator
-  );
+  try {
+    return (
+      typeof window !== "undefined" &&
+      "Notification" in window &&
+      "serviceWorker" in navigator
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function getNotificationPermission(): NotificationPermission | "unsupported" {
-  if (!isNotificationSupported()) return "unsupported";
-  return Notification.permission;
+  try {
+    if (!isNotificationSupported()) return "unsupported";
+    return Notification.permission;
+  } catch {
+    return "unsupported";
+  }
 }
 
 export function detectDeviceInfo() {
