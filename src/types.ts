@@ -11,10 +11,21 @@ export interface Order {
   customerAddress: string;
   total: number;
   status: string;
+  orderStatus?: string;
+  deliveryStatus?: string;
   items: OrderItem[];
   createdAt: any;
   updatedAt?: any;
+  acceptedAt?: any;
+  packagingAt?: any;
+  packedAt?: any;
+  onTheWayAt?: any;
+  dispatchedAt?: any;
+  outForDeliveryAt?: any;
+  deliveredAt?: any;
+  cancelledAt?: any;
   paymentMethod: string;
+  paymentStatus?: string;
   notes?: string;
   customerNotes?: string;
   internalNotes?: string;
@@ -25,6 +36,7 @@ export interface Order {
   returnRejectionReason?: string;
   returnApprovedAt?: any;
   returnRejectedAt?: any;
+  isCompleted?: boolean;
 }
 
 export interface Product {

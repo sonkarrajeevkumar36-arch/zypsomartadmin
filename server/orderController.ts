@@ -8,6 +8,8 @@ const FIREBASE_API_KEY = "AIzaSyDxztzPoCTCzckaEsvupHJOyCHEhAxr9DU";
 export const VALID_STATUSES = [
   "pending",
   "accepted",
+  "packaging",
+  "on_the_way",
   "delivered",
   "cancelled",
   "return_requested",
@@ -24,7 +26,26 @@ export function normalizeStatus(rawStatus: any): OrderStatus | null {
 
   if (s === "pending") return "pending";
   if (s === "accepted" || s === "accept") return "accepted";
-  if (s === "delivered" || s === "deliver") return "delivered";
+  if (
+    s === "packaging" ||
+    s === "packing" ||
+    s === "packed" ||
+    s === "preparing" ||
+    s === "in_packaging"
+  ) {
+    return "packaging";
+  }
+  if (
+    s === "on_the_way" ||
+    s === "ontheway" ||
+    s === "out_for_delivery" ||
+    s === "outfordelivery" ||
+    s === "dispatched" ||
+    s === "in_transit"
+  ) {
+    return "on_the_way";
+  }
+  if (s === "delivered" || s === "deliver" || s === "completed") return "delivered";
   if (s === "cancelled" || s === "cancel" || s === "canceled") return "cancelled";
   if (
     s === "return_requested" ||
@@ -60,7 +81,9 @@ export function normalizeStatus(rawStatus: any): OrderStatus | null {
 // Allowed state transitions map
 export const ALLOWED_TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
   pending: ["accepted", "cancelled"],
-  accepted: ["delivered", "cancelled"],
+  accepted: ["packaging", "on_the_way", "delivered", "cancelled"],
+  packaging: ["on_the_way", "delivered", "cancelled"],
+  on_the_way: ["delivered", "cancelled"],
   delivered: ["return_requested", "cancelled"],
   return_requested: ["return_approved", "return_rejected", "cancelled"],
   return_approved: ["return_approved", "return_rejected"], // idempotent or reconsider
@@ -275,9 +298,10 @@ export async function updateOrderStatusController(req: Request, res: Response): 
     const now = new Date();
     const updatePayload: Record<string, any> = {
       status: targetStatus,
+      orderStatus: targetStatus,
       updatedAt: now
     };
-    const fieldPathsToUpdate = ["status", "updatedAt"];
+    const fieldPathsToUpdate = ["status", "orderStatus", "updatedAt"];
 
     if (targetStatus === "return_approved") {
       updatePayload.returnStatus = "approved";
@@ -301,10 +325,26 @@ export async function updateOrderStatusController(req: Request, res: Response): 
       fieldPathsToUpdate.push("returnStatus", "type", "returnRequestedAt");
     } else if (targetStatus === "accepted") {
       updatePayload.acceptedAt = now;
-      fieldPathsToUpdate.push("acceptedAt");
+      updatePayload.acceptTime = now.toISOString();
+      fieldPathsToUpdate.push("acceptedAt", "acceptTime");
+    } else if (targetStatus === "packaging") {
+      updatePayload.packagingAt = now;
+      updatePayload.packedAt = now;
+      updatePayload.packagingTime = now.toISOString();
+      fieldPathsToUpdate.push("packagingAt", "packedAt", "packagingTime");
+    } else if (targetStatus === "on_the_way") {
+      updatePayload.onTheWayAt = now;
+      updatePayload.dispatchedAt = now;
+      updatePayload.outForDeliveryAt = now;
+      updatePayload.onTheWayTime = now.toISOString();
+      updatePayload.deliveryStatus = "out_for_delivery";
+      fieldPathsToUpdate.push("onTheWayAt", "dispatchedAt", "outForDeliveryAt", "onTheWayTime", "deliveryStatus");
     } else if (targetStatus === "delivered") {
       updatePayload.deliveredAt = now;
-      fieldPathsToUpdate.push("deliveredAt");
+      updatePayload.deliveredTime = now.toISOString();
+      updatePayload.isCompleted = true;
+      updatePayload.deliveryStatus = "delivered";
+      fieldPathsToUpdate.push("deliveredAt", "deliveredTime", "isCompleted", "deliveryStatus");
     } else if (targetStatus === "cancelled") {
       updatePayload.cancelledAt = now;
       if (notes) updatePayload.cancelReason = notes;
@@ -322,7 +362,15 @@ export async function updateOrderStatusController(req: Request, res: Response): 
     res.status(200).json({
       success: true,
       message:
-        targetStatus === "return_approved"
+        targetStatus === "accepted"
+          ? "Order Accepted Successfully"
+          : targetStatus === "packaging"
+          ? "Order Marked as Packaging"
+          : targetStatus === "on_the_way"
+          ? "Order Marked as On the Way (Out for Delivery)"
+          : targetStatus === "delivered"
+          ? "Order Marked as Delivered (Completed)"
+          : targetStatus === "return_approved"
           ? "Return Request Approved Successfully"
           : targetStatus === "return_rejected"
           ? "Return Request Rejected Successfully"

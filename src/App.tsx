@@ -58,12 +58,18 @@ import {
   Filter,
   Check,
   ToggleLeft,
-  ToggleRight
+  ToggleRight,
+  Truck,
+  CheckCheck,
+  Navigation,
+  ChevronRight,
+  Printer
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import appLogo from "./assets/images/logo.png";
 import { auth, db } from "./firebase";
 import { Order, Product, Category } from "./types";
+import { InvoiceModal } from "./components/InvoiceModal";
 import { alarmAudio } from "./utils/alarmAudio";
 import {
   registerDeviceForNotifications,
@@ -94,7 +100,7 @@ const formatAddress = (addr: any): string => {
   return String(addr);
 };
 
-// Robust normalizer for order status to handle all return/cancel/delivery variants
+// Robust normalizer for order status to handle all return/cancel/delivery/packaging/on_the_way variants
 export const normalizeStatus = (
   rawStatus?: string,
   rawType?: string,
@@ -118,7 +124,26 @@ export const normalizeStatus = (
     return "return_requested";
   }
   if (s === "accepted" || s === "accept") return "accepted";
-  if (s === "delivered" || s === "deliver") return "delivered";
+  if (
+    s === "packaging" ||
+    s === "packing" ||
+    s === "packed" ||
+    s === "preparing" ||
+    s === "in_packaging"
+  ) {
+    return "packaging";
+  }
+  if (
+    s === "on_the_way" ||
+    s === "ontheway" ||
+    s === "out_for_delivery" ||
+    s === "outfordelivery" ||
+    s === "dispatched" ||
+    s === "in_transit"
+  ) {
+    return "on_the_way";
+  }
+  if (s === "delivered" || s === "deliver" || s === "completed") return "delivered";
   if (s === "cancelled" || s === "cancel" || s === "canceled") return "cancelled";
 
   return "pending";
@@ -272,11 +297,23 @@ const parseOrderDoc = (id: string, data: any): Order => {
     customerAddress,
     total,
     status,
+    orderStatus: data.orderStatus || status,
+    deliveryStatus: data.deliveryStatus,
     items,
     createdAt: data.createdAt,
     updatedAt: data.updatedAt,
+    acceptedAt: data.acceptedAt || data.acceptTime,
+    packagingAt: data.packagingAt || data.packedAt || data.packagingTime,
+    packedAt: data.packedAt,
+    onTheWayAt: data.onTheWayAt || data.dispatchedAt || data.outForDeliveryAt || data.onTheWayTime,
+    dispatchedAt: data.dispatchedAt || data.outForDeliveryAt,
+    outForDeliveryAt: data.outForDeliveryAt,
+    deliveredAt: data.deliveredAt || data.deliveredTime,
+    cancelledAt: data.cancelledAt,
+    isCompleted: Boolean(data.isCompleted || status === "delivered"),
     paymentMethod:
       data.paymentMethod || data.paymentType || data.paymentMode || "Cash on Delivery",
+    paymentStatus: data.paymentStatus || (data.paymentMethod === "Razorpay" ? "Paid Online" : "Pending COD"),
     notes,
     customerNotes: notes,
     internalNotes: data.internalNotes || data.adminNotes || data.adminNote || "",
@@ -605,6 +642,9 @@ function AdminDashboard() {
   // Order Deletion states (Feature 1: Delete test/fake orders permanently)
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState<boolean>(false);
+
+  // Official Tax Invoice Modal state
+  const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState<Order | null>(null);
 
   // Filter & Search states with 200ms input debouncing for smooth typing & zero lag
   const [statusFilter, setStatusFilter] = useState("all");
@@ -1636,6 +1676,7 @@ function AdminDashboard() {
     setUpdatingOrders((prev) => ({ ...prev, [orderId]: true }));
 
     // Optimistic UI state update
+    const now = new Date();
     setOrders((prevOrders) =>
       prevOrders.map((ord) => {
         if (ord.id === orderId) {
@@ -1644,14 +1685,29 @@ function AdminDashboard() {
           return {
             ...ord,
             status: normalizedTarget,
+            orderStatus: normalizedTarget,
             type: isReturn ? "return" : ord.type,
+            acceptedAt: normalizedTarget === "accepted" ? now : ord.acceptedAt,
+            packagingAt: normalizedTarget === "packaging" ? now : ord.packagingAt,
+            packedAt: normalizedTarget === "packaging" ? now : ord.packedAt,
+            onTheWayAt: normalizedTarget === "on_the_way" ? now : ord.onTheWayAt,
+            dispatchedAt: normalizedTarget === "on_the_way" ? now : ord.dispatchedAt,
+            deliveredAt: normalizedTarget === "delivered" ? now : ord.deliveredAt,
+            cancelledAt: normalizedTarget === "cancelled" ? now : ord.cancelledAt,
+            isCompleted: normalizedTarget === "delivered" ? true : ord.isCompleted,
+            deliveryStatus:
+              normalizedTarget === "delivered"
+                ? "delivered"
+                : normalizedTarget === "on_the_way"
+                ? "out_for_delivery"
+                : ord.deliveryStatus,
             returnStatus:
               normalizedTarget === "return_approved"
                 ? "approved"
                 : normalizedTarget === "return_rejected"
                 ? "rejected"
                 : ord.returnStatus,
-            updatedAt: new Date()
+            updatedAt: now
           };
         }
         return ord;
@@ -1694,32 +1750,65 @@ function AdminDashboard() {
         console.warn("[API] Endpoint network notice, falling back to direct Firestore:", networkErr);
       }
 
-      // 2. Direct Firestore update for real-time guarantee
+      // 2. Direct Firestore update for instant real-time synchronization with Customer App
       const orderRef = doc(db, "orders", orderId);
       const updateData: Record<string, any> = {
         status: normalizedTarget,
-        updatedAt: new Date()
+        orderStatus: normalizedTarget,
+        updatedAt: now
       };
 
       if (normalizedTarget === "return_approved") {
         updateData.returnStatus = "approved";
         updateData.type = "return";
         updateData.isReturned = true;
-        updateData.returnApprovedAt = new Date();
+        updateData.returnApprovedAt = now;
       } else if (normalizedTarget === "return_rejected") {
         updateData.returnStatus = "rejected";
         updateData.type = "return";
-        updateData.returnRejectedAt = new Date();
+        updateData.returnRejectedAt = now;
       } else if (normalizedTarget === "return_requested") {
         updateData.returnStatus = "requested";
         updateData.type = "return";
+        updateData.returnRequestedAt = now;
+      } else if (normalizedTarget === "accepted") {
+        updateData.acceptedAt = now;
+        updateData.acceptTime = now.toISOString();
+      } else if (normalizedTarget === "packaging") {
+        updateData.packagingAt = now;
+        updateData.packedAt = now;
+        updateData.packagingTime = now.toISOString();
+      } else if (normalizedTarget === "on_the_way") {
+        updateData.onTheWayAt = now;
+        updateData.dispatchedAt = now;
+        updateData.outForDeliveryAt = now;
+        updateData.onTheWayTime = now.toISOString();
+        updateData.deliveryStatus = "out_for_delivery";
+      } else if (normalizedTarget === "delivered") {
+        updateData.deliveredAt = now;
+        updateData.deliveredTime = now.toISOString();
+        updateData.isCompleted = true;
+        updateData.deliveryStatus = "delivered";
+      } else if (normalizedTarget === "cancelled") {
+        updateData.cancelledAt = now;
       }
 
       await updateDoc(orderRef, updateData);
 
+      const defaultMsg =
+        normalizedTarget === "accepted"
+          ? "Order Accepted Successfully"
+          : normalizedTarget === "packaging"
+          ? "Order Marked as Packaging 📦"
+          : normalizedTarget === "on_the_way"
+          ? "Order Marked as On the Way 🚚"
+          : normalizedTarget === "delivered"
+          ? "Order Marked as Delivered & Moved to Completed ✅"
+          : `Order status updated to ${normalizedTarget.toUpperCase()}`;
+
       showNotification(
         "success",
-        successMessage || `Order status updated to ${normalizedTarget.toUpperCase()}`
+        successMessage || defaultMsg
       );
     } catch (err: any) {
       console.error("Error updating order status:", err);
@@ -2316,6 +2405,10 @@ function AdminDashboard() {
     let list = [...searchedOrders];
     if (statusFilter === "returns") {
       list = list.filter(isReturnOrder);
+    } else if (statusFilter === "completed" || statusFilter === "delivered") {
+      list = list.filter(
+        (ord) => !isReturnOrder(ord) && (ord.status || "pending").toLowerCase() === "delivered"
+      );
     } else if (statusFilter !== "all") {
       list = list.filter(
         (ord) => !isReturnOrder(ord) && (ord.status || "pending").toLowerCase() === statusFilter
@@ -2795,40 +2888,6 @@ function AdminDashboard() {
             </span>
           </button>
 
-          {/* Feature 1 (Arrow 1): Shop Open / Closed Status Toggle */}
-          <button
-            onClick={() => handleUpdateShopStatus(!isShopOpen)}
-            disabled={isUpdatingShopStatus}
-            className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-black transition-all cursor-pointer shadow-xs border ${
-              isShopOpen
-                ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
-                : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200"
-            }`}
-            title={isShopOpen ? "Click to switch Shop to CLOSED" : "Click to switch Shop to OPEN"}
-          >
-            <div className="flex items-center gap-2">
-              <span
-                className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                  isShopOpen
-                    ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
-                    : "bg-red-600 shadow-xs shadow-red-600/50 animate-pulse"
-                }`}
-              />
-              <span className="font-black text-xs">
-                {isShopOpen ? "🟢 SHOP OPEN" : "🔴 SHOP CLOSED"}
-              </span>
-            </div>
-            <span
-              className={`text-[9px] font-black px-2 py-0.5 rounded-md uppercase tracking-wider ${
-                isShopOpen
-                  ? "bg-emerald-600 text-white"
-                  : "bg-red-600 text-white animate-pulse"
-              }`}
-            >
-              {isShopOpen ? "OPEN" : "CLOSED"}
-            </span>
-          </button>
-
           {/* Feature 2 (Arrow 2): Alarm Status & Quick Toggle */}
           <div
             className={`w-full flex items-center justify-between px-3.5 py-2 rounded-xl text-xs font-bold transition-all shadow-xs border ${
@@ -2969,17 +3028,57 @@ function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Install button in header for mobile */}
-              {showInstallBtn && !isAppInstalled && deferredPrompt && (
+              {/* Shop Status & Header Controls */}
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button
-                  onClick={handleInstallApp}
-                  className="sm:hidden flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs active:scale-95 transition-all shrink-0 cursor-pointer"
-                  title="Install Zypso Mart App"
+                  onClick={() => handleUpdateShopStatus(!isShopOpen)}
+                  disabled={isUpdatingShopStatus}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer border shadow-2xs shrink-0 ${
+                    isShopOpen
+                      ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                      : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200 animate-pulse"
+                  }`}
+                  title={isShopOpen ? "Store is OPEN. Click to switch to CLOSED." : "Store is CLOSED. Click to switch to OPEN."}
                 >
-                  <Download size={13} className="stroke-[2.5]" />
-                  <span>Install</span>
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      isShopOpen
+                        ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
+                        : "bg-red-600 shadow-xs shadow-red-600/50 animate-ping"
+                    }`}
+                  />
+                  <span className="text-[11px] font-black">{isShopOpen ? "OPEN" : "CLOSED"}</span>
                 </button>
-              )}
+
+                <button
+                  onClick={() => setShowAlarmSettingsModal(true)}
+                  className={`p-1.5 sm:p-2 rounded-xl border transition-all cursor-pointer shrink-0 ${
+                    isAlarmRinging
+                      ? "bg-red-600 text-white border-red-700 animate-bounce"
+                      : isAlarmEnabled
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
+                      : "bg-slate-100 text-slate-500 border-slate-200"
+                  }`}
+                  title="Order Alarm & FCM Push Notification Settings"
+                >
+                  {isAlarmRinging ? (
+                    <Volume2 size={16} className="animate-spin text-white" />
+                  ) : (
+                    <BellRing size={16} />
+                  )}
+                </button>
+
+                {showInstallBtn && !isAppInstalled && deferredPrompt && (
+                  <button
+                    onClick={handleInstallApp}
+                    className="sm:hidden flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs active:scale-95 transition-all shrink-0 cursor-pointer"
+                    title="Install Zypso Mart App"
+                  >
+                    <Download size={13} className="stroke-[2.5]" />
+                    <span>Install</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
@@ -3851,6 +3950,17 @@ function AdminDashboard() {
             )}
           </AnimatePresence>
 
+          {/* Official Tax Invoice Modal (View, Download, Print) */}
+          <AnimatePresence>
+            {selectedOrderForInvoice && (
+              <InvoiceModal
+                order={selectedOrderForInvoice}
+                onClose={() => setSelectedOrderForInvoice(null)}
+                onNotify={showNotification}
+              />
+            )}
+          </AnimatePresence>
+
           {/* Admin Alarm & Notification Settings Modal */}
           <AnimatePresence>
             {showAlarmSettingsModal && (
@@ -4259,26 +4369,35 @@ function AdminDashboard() {
                     </span>
                   </h3>
 
+                  {/* Proper Invoice Option replacing old CV button */}
                   <button
-                    onClick={exportOrdersToCSV}
+                    onClick={() => {
+                      if (filteredOrders.length > 0) {
+                        setSelectedOrderForInvoice(filteredOrders[0]);
+                      } else {
+                        showNotification("error", "No orders available to generate an invoice.");
+                      }
+                    }}
                     disabled={filteredOrders.length === 0}
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 disabled:bg-slate-100 text-emerald-800 disabled:text-slate-400 font-bold text-xs rounded-xl border border-emerald-200/80 disabled:border-slate-200 shadow-2xs transition-all cursor-pointer disabled:cursor-not-allowed shrink-0 active:scale-95"
-                    title={`Export ${filteredOrders.length} filtered orders to CSV file`}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 disabled:bg-slate-100 text-indigo-700 disabled:text-slate-400 font-bold text-xs rounded-xl border border-indigo-200 disabled:border-slate-200 shadow-2xs transition-all cursor-pointer disabled:cursor-not-allowed shrink-0 active:scale-95"
+                    title="View, Print & Download Official Tax Invoice"
                   >
-                    <Download size={13} className="stroke-[2.5]" />
-                    <span>Export CSV ({filteredOrders.length})</span>
+                    <FileText size={13} className="stroke-[2.5]" />
+                    <span>Invoice ({filteredOrders.length})</span>
                   </button>
                 </div>
 
                 <div className="flex flex-wrap gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-                  {["all", "pending", "accepted", "delivered", "cancelled", "returns"].map((key) => {
-                    const label =
-                      key === "all"
-                        ? "All Orders"
-                        : key === "returns"
-                        ? "RETURNS 🔄"
-                        : key.toUpperCase();
-
+                  {[
+                    { key: "all", label: "All Orders" },
+                    { key: "pending", label: "1. Pending (New)" },
+                    { key: "accepted", label: "2. Accepted" },
+                    { key: "packaging", label: "3. Packaging 📦" },
+                    { key: "on_the_way", label: "4. On the Way 🚚" },
+                    { key: "delivered", label: "Completed Orders ✅" },
+                    { key: "cancelled", label: "Cancelled" },
+                    { key: "returns", label: "Returns 🔄" }
+                  ].map(({ key, label }) => {
                     const count =
                       key === "all"
                         ? orders.length
@@ -4296,7 +4415,7 @@ function AdminDashboard() {
                         onClick={() => setStatusFilter(key)}
                         className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
                           statusFilter === key
-                            ? "bg-emerald-500 text-white shadow-sm shadow-emerald-100"
+                            ? "bg-emerald-600 text-white shadow-sm shadow-emerald-200"
                             : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-50"
                         }`}
                       >
@@ -4315,6 +4434,36 @@ function AdminDashboard() {
                   })}
                 </div>
               </div>
+
+              {/* Dedicated Completed Orders Section Banner when filter is delivered */}
+              {statusFilter === "delivered" && (
+                <div className="bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-emerald-500/5 border border-emerald-200 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs">
+                  <div className="flex items-center gap-3.5">
+                    <div className="w-11 h-11 rounded-2xl bg-emerald-600 text-white flex items-center justify-center font-black shadow-md shadow-emerald-600/20 shrink-0">
+                      <CheckCheck size={22} className="stroke-[2.5]" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-base font-black text-slate-900 tracking-tight">
+                          Completed Orders Section
+                        </h4>
+                        <span className="text-[10px] font-extrabold uppercase px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200">
+                          {filteredOrders.length} Delivered
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 font-medium">
+                        All successfully fulfilled & delivered customer orders. Total revenue collected: <span className="font-bold text-emerald-700">₹{filteredOrders.reduce((sum, o) => sum + (Number(o.total) || 0), 0).toLocaleString()}</span>
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setStatusFilter("all")}
+                    className="self-start sm:self-auto text-xs font-bold text-emerald-700 hover:text-emerald-800 bg-white px-3 py-1.5 rounded-xl border border-emerald-200 shadow-2xs hover:bg-emerald-50 transition-colors cursor-pointer"
+                  >
+                    View All Orders &rarr;
+                  </button>
+                </div>
+              )}
 
               {/* Order List */}
               {filteredOrders.length === 0 ? (
@@ -4394,11 +4543,15 @@ function AdminDashboard() {
                             {/* Badge & Delete Button */}
                             <div className="flex items-center gap-2 shrink-0">
                               <span
-                                className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shadow-sm ${
+                                className={`px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider shadow-xs ${
                                   currentStatus === "accepted"
-                                    ? "bg-emerald-100 text-emerald-800 border border-emerald-200/50"
+                                    ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                                    : currentStatus === "packaging"
+                                    ? "bg-amber-100 text-amber-800 border border-amber-300"
+                                    : currentStatus === "on_the_way"
+                                    ? "bg-blue-100 text-blue-800 border border-blue-300"
                                     : currentStatus === "delivered"
-                                    ? "bg-blue-100 text-blue-800 border border-blue-200/50"
+                                    ? "bg-emerald-100 text-emerald-800 border border-emerald-300 ring-2 ring-emerald-200"
                                     : currentStatus === "cancelled"
                                     ? "bg-red-100 text-red-800 border border-red-200/50"
                                     : isReturn
@@ -4416,8 +4569,26 @@ function AdminDashboard() {
                                     : isReturnRejected
                                     ? "RETURN REJECTED"
                                     : "RETURN REQUEST"
-                                  : order.status.toUpperCase()}
+                                  : currentStatus === "packaging"
+                                  ? "PACKAGING 📦"
+                                  : currentStatus === "on_the_way"
+                                  ? "ON THE WAY 🚚"
+                                  : currentStatus === "delivered"
+                                  ? "COMPLETED & DELIVERED ✅"
+                                  : currentStatus === "accepted"
+                                  ? "ORDER ACCEPTED"
+                                  : "PENDING (NEW)"}
                               </span>
+
+                              {/* Invoice Option: View, Download & Print */}
+                              <button
+                                onClick={() => setSelectedOrderForInvoice(order)}
+                                className="flex items-center gap-1 px-2.5 py-1 text-indigo-700 hover:text-white bg-indigo-50 hover:bg-indigo-600 rounded-lg transition-all cursor-pointer shrink-0 text-[11px] font-black border border-indigo-200 hover:border-indigo-600 shadow-2xs active:scale-95"
+                                title="View, Print & Download Official Tax Invoice"
+                              >
+                                <FileText size={13} className="shrink-0 stroke-[2.5]" />
+                                <span>Invoice</span>
+                              </button>
 
                               {/* Delete Order Button */}
                               <button
@@ -4510,18 +4681,82 @@ function AdminDashboard() {
                             </div>
                           </div>
 
-                          {/* Action Buttons */}
-                          <div className="grid grid-cols-3 gap-1.5 sm:gap-2 mt-2 pt-2 border-t border-slate-100 relative">
+                          {/* Order Status Stepper (Order Placed -> Accepted -> Packaging -> On the Way -> Delivered) */}
+                          {!isReturn && currentStatus !== "cancelled" && (
+                            <div className="bg-slate-50/90 rounded-xl p-2.5 sm:p-3 border border-slate-100 mb-3 overflow-x-auto scrollbar-none">
+                              <div className="flex items-center justify-between relative px-2 min-w-[270px]">
+                                <div className="absolute top-3 left-6 right-6 h-1 -translate-y-1/2 bg-slate-200 -z-0 rounded-full" />
+                                <div
+                                  className="absolute top-3 left-6 h-1 -translate-y-1/2 bg-emerald-500 transition-all duration-500 -z-0 rounded-full"
+                                  style={{
+                                    width:
+                                      currentStatus === "pending"
+                                        ? "0%"
+                                        : currentStatus === "accepted"
+                                        ? "33%"
+                                        : currentStatus === "packaging"
+                                        ? "66%"
+                                        : currentStatus === "on_the_way" || currentStatus === "delivered"
+                                        ? "calc(100% - 3rem)"
+                                        : "0%"
+                                  }}
+                                />
+
+                                {[
+                                  { key: "pending", label: "Placed", num: "1" },
+                                  { key: "accepted", label: "Accepted", num: "2" },
+                                  { key: "packaging", label: "Packaging", num: "3" },
+                                  { key: "on_the_way", label: "On the Way", num: "4" },
+                                  { key: "delivered", label: "Delivered", num: "5" }
+                                ].map((step, idx) => {
+                                  const stepOrder = ["pending", "accepted", "packaging", "on_the_way", "delivered"];
+                                  const currentIdx = stepOrder.indexOf(currentStatus);
+                                  const isStepDone = currentIdx > idx || (currentStatus === "delivered" && idx === 4);
+                                  const isStepActive = currentIdx === idx && currentStatus !== "delivered";
+
+                                  return (
+                                    <div key={step.key} className="flex flex-col items-center relative z-10 shrink-0">
+                                      <div
+                                        className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-black transition-all ${
+                                          isStepDone
+                                            ? "bg-emerald-600 text-white shadow-xs"
+                                            : isStepActive
+                                            ? "bg-emerald-600 text-white ring-4 ring-emerald-100 scale-110 font-bold"
+                                            : "bg-slate-200 text-slate-500"
+                                        }`}
+                                      >
+                                        {isStepDone ? <Check size={11} strokeWidth={3} /> : step.num}
+                                      </div>
+                                      <span
+                                        className={`text-[8.5px] sm:text-[9px] mt-1 font-bold whitespace-nowrap ${
+                                          isStepActive
+                                            ? "text-emerald-700 font-extrabold"
+                                            : isStepDone
+                                            ? "text-slate-700"
+                                            : "text-slate-400"
+                                        }`}
+                                      >
+                                        {step.label}
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Action Buttons: Dynamic Next Sequential Status Button */}
+                          <div className="mt-2 pt-2.5 border-t border-slate-100 relative">
                             {isUpdating && (
-                              <div className="absolute inset-0 bg-white/75 backdrop-blur-[1px] flex items-center justify-center z-10 rounded-xl">
+                              <div className="absolute inset-0 bg-white/85 backdrop-blur-[1px] flex items-center justify-center z-20 rounded-xl">
                                 <RefreshCcw size={16} className="animate-spin text-emerald-600 mr-2" />
-                                <span className="text-xs font-bold text-slate-600">Updating...</span>
+                                <span className="text-xs font-bold text-slate-700">Updating status in Firestore...</span>
                               </div>
                             )}
 
                             {isReturn ? (
                               /* Return Order Buttons */
-                              <>
+                              <div className="grid grid-cols-3 gap-2">
                                 <button
                                   disabled={isUpdating || isReturnApproved}
                                   onClick={() =>
@@ -4531,15 +4766,15 @@ function AdminDashboard() {
                                       "Return Request Approved Successfully"
                                     )
                                   }
-                                  className={`col-span-2 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 py-2 sm:py-2.5 px-2 rounded-xl font-bold text-[10px] sm:text-[11px] uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
+                                  className={`col-span-2 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
                                     isReturnApproved
                                       ? "bg-emerald-100 text-emerald-800 border border-emerald-200/50 cursor-not-allowed opacity-60"
-                                      : "bg-emerald-500 hover:bg-emerald-600 text-white shadow-md active:scale-[0.98]"
+                                      : "bg-emerald-600 hover:bg-emerald-700 text-white shadow-md active:scale-[0.98]"
                                   }`}
                                 >
-                                  <CircleCheckBig size={14} className="shrink-0" />
+                                  <CircleCheckBig size={15} className="shrink-0" />
                                   <span className="truncate">
-                                    {isReturnApproved ? "Approved" : "Approve Return"}
+                                    {isReturnApproved ? "Return Approved" : "Approve Return"}
                                   </span>
                                 </button>
 
@@ -4558,72 +4793,143 @@ function AdminDashboard() {
                                       );
                                     }
                                   }}
-                                  className={`col-span-1 flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 py-2 sm:py-2.5 px-2 rounded-xl font-bold text-[10px] sm:text-[11px] uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
+                                  className={`col-span-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
                                     isReturnRejected
                                       ? "bg-red-100 text-red-800 border border-red-200/50 cursor-not-allowed opacity-60"
                                       : "bg-red-600 hover:bg-red-700 text-white shadow-md active:scale-[0.98]"
                                   }`}
                                 >
-                                  <CircleX size={14} className="shrink-0" />
+                                  <CircleX size={15} className="shrink-0" />
                                   <span className="truncate">{isReturnRejected ? "Rejected" : "Reject"}</span>
                                 </button>
-                              </>
+                              </div>
+                            ) : currentStatus === "delivered" ? (
+                              /* Completed & Delivered Order Card Banner */
+                              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 flex items-center justify-between">
+                                <div className="flex items-center gap-2.5 text-emerald-800">
+                                  <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                                    <CheckCheck size={18} className="stroke-[2.5]" />
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-black uppercase tracking-wide text-emerald-900">
+                                      Order Completed & Delivered
+                                    </p>
+                                    <p className="text-[11px] text-emerald-700 font-medium">
+                                      {order.deliveredAt ? `Delivered on ${formatDate(order.deliveredAt)}` : "Moved to Completed Orders section"}
+                                    </p>
+                                  </div>
+                                </div>
+                                <span className="text-[10px] font-black uppercase px-2.5 py-1 bg-emerald-200/90 text-emerald-950 rounded-lg shadow-2xs">
+                                  Completed ✅
+                                </span>
+                              </div>
+                            ) : currentStatus === "cancelled" ? (
+                              /* Cancelled Order Banner */
+                              <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center justify-between text-red-800">
+                                <div className="flex items-center gap-2.5">
+                                  <div className="w-8 h-8 rounded-lg bg-red-600 text-white flex items-center justify-center shrink-0">
+                                    <CircleX size={18} />
+                                  </div>
+                                  <div>
+                                    <p className="text-xs font-black uppercase tracking-wide text-red-900">
+                                      Order Cancelled
+                                    </p>
+                                    <p className="text-[11px] text-red-700 font-medium">
+                                      {order.cancelledAt ? `Cancelled on ${formatDate(order.cancelledAt)}` : "Order was cancelled / rejected"}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
                             ) : (
-                              /* Standard Order Buttons */
-                              <>
-                                <button
-                                  disabled={currentStatus !== "pending" || isUpdating}
-                                  onClick={() =>
-                                    handleUpdateOrderStatus(
-                                      order.id,
-                                      "accepted",
-                                      "Order Accepted Successfully"
-                                    )
-                                  }
-                                  className={`flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 py-2 sm:py-2.5 px-1.5 sm:px-2 rounded-xl font-bold text-[10px] sm:text-[11px] uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
-                                    currentStatus === "accepted" || currentStatus === "delivered"
-                                      ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60 border border-slate-200"
-                                      : currentStatus === "pending"
-                                      ? "bg-emerald-500 hover:bg-emerald-600 text-white shadow-md active:scale-[0.98]"
-                                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
-                                  }`}
-                                  title="Accept Order"
-                                >
-                                  <CircleCheckBig size={14} className="shrink-0" />
-                                  <span className="truncate">Accept</span>
-                                </button>
+                              /* Dynamic Sequential Next Status Button Flow */
+                              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                                {/* Next Sequential Button: 1. Accept Order */}
+                                {currentStatus === "pending" && (
+                                  <button
+                                    disabled={isUpdating}
+                                    onClick={() =>
+                                      handleUpdateOrderStatus(
+                                        order.id,
+                                        "accepted",
+                                        "Order Accepted Successfully"
+                                      )
+                                    }
+                                    className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20 active:scale-[0.98] transition-all cursor-pointer min-h-[44px]"
+                                    title="Click to accept this new order (moves to step 2: Packaging)"
+                                  >
+                                    <CircleCheckBig size={16} className="shrink-0 stroke-[2.5]" />
+                                    <span>Accept Order</span>
+                                    <ChevronRight size={14} className="opacity-75" />
+                                  </button>
+                                )}
 
-                                <button
-                                  disabled={currentStatus !== "accepted" || isUpdating}
-                                  onClick={() =>
-                                    handleUpdateOrderStatus(
-                                      order.id,
-                                      "delivered",
-                                      "Order Delivered Successfully"
-                                    )
-                                  }
-                                  className={`flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 py-2 sm:py-2.5 px-1.5 sm:px-2 rounded-xl font-bold text-[10px] sm:text-[11px] uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
-                                    currentStatus === "delivered"
-                                      ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60 border border-slate-200"
-                                      : currentStatus === "accepted"
-                                      ? "bg-blue-500 hover:bg-blue-600 text-white shadow-md active:scale-[0.98]"
-                                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
-                                  }`}
-                                  title="Mark as Delivered"
-                                >
-                                  <ThumbsUp size={14} className="shrink-0" />
-                                  <span className="truncate">Delivered</span>
-                                </button>
+                                {/* Next Sequential Button: 2. Packaging */}
+                                {currentStatus === "accepted" && (
+                                  <button
+                                    disabled={isUpdating}
+                                    onClick={() =>
+                                      handleUpdateOrderStatus(
+                                        order.id,
+                                        "packaging",
+                                        "Order Marked as Packaging 📦"
+                                      )
+                                    }
+                                    className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider bg-amber-500 hover:bg-amber-600 text-white shadow-md shadow-amber-500/20 active:scale-[0.98] transition-all cursor-pointer min-h-[44px]"
+                                    title="Click to mark order as Packaging (moves to step 3: On the Way)"
+                                  >
+                                    <Package size={16} className="shrink-0 stroke-[2.5]" />
+                                    <span>Packaging</span>
+                                    <ChevronRight size={14} className="opacity-75" />
+                                  </button>
+                                )}
 
+                                {/* Next Sequential Button: 3. On the Way */}
+                                {currentStatus === "packaging" && (
+                                  <button
+                                    disabled={isUpdating}
+                                    onClick={() =>
+                                      handleUpdateOrderStatus(
+                                        order.id,
+                                        "on_the_way",
+                                        "Order Dispatched & On the Way 🚚"
+                                      )
+                                    }
+                                    className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider bg-blue-600 hover:bg-blue-700 text-white shadow-md shadow-blue-600/20 active:scale-[0.98] transition-all cursor-pointer min-h-[44px]"
+                                    title="Click to mark order as On the Way (moves to step 4: Delivered)"
+                                  >
+                                    <Truck size={16} className="shrink-0 stroke-[2.5]" />
+                                    <span>On the Way</span>
+                                    <ChevronRight size={14} className="opacity-75" />
+                                  </button>
+                                )}
+
+                                {/* Next Sequential Button: 4. Delivered */}
+                                {currentStatus === "on_the_way" && (
+                                  <button
+                                    disabled={isUpdating}
+                                    onClick={() =>
+                                      handleUpdateOrderStatus(
+                                        order.id,
+                                        "delivered",
+                                        "Order Marked as Delivered & Moved to Completed Orders ✅"
+                                      )
+                                    }
+                                    className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl font-black text-xs uppercase tracking-wider bg-emerald-600 hover:bg-emerald-700 text-white shadow-md shadow-emerald-600/20 active:scale-[0.98] transition-all cursor-pointer min-h-[44px]"
+                                    title="Click to mark order as Delivered (moves to Completed Orders section)"
+                                  >
+                                    <CheckCheck size={17} className="shrink-0 stroke-[2.5]" />
+                                    <span>Delivered</span>
+                                    <ChevronRight size={14} className="opacity-75" />
+                                  </button>
+                                )}
+
+                                {/* Secondary Action: Reject / Cancel Button */}
                                 <button
-                                  disabled={
-                                    (currentStatus !== "pending" && currentStatus !== "accepted") ||
-                                    isUpdating
-                                  }
+                                  disabled={isUpdating}
                                   onClick={() => {
                                     if (
                                       window.confirm(
-                                        "Are you sure you want to cancel / reject this order?"
+                                        `Are you sure you want to cancel / reject Order #${order.id.slice(-6).toUpperCase()}?`
                                       )
                                     ) {
                                       handleUpdateOrderStatus(
@@ -4633,19 +4939,13 @@ function AdminDashboard() {
                                       );
                                     }
                                   }}
-                                  className={`flex flex-col sm:flex-row items-center justify-center gap-1 sm:gap-1.5 py-2 sm:py-2.5 px-1.5 sm:px-2 rounded-xl font-bold text-[10px] sm:text-[11px] uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
-                                    currentStatus === "cancelled"
-                                      ? "bg-slate-100 text-slate-400 cursor-not-allowed opacity-60 border border-slate-200"
-                                      : currentStatus === "pending" || currentStatus === "accepted"
-                                      ? "bg-red-500 hover:bg-red-600 text-white shadow-md active:scale-[0.98]"
-                                      : "bg-slate-100 text-slate-400 cursor-not-allowed"
-                                  }`}
-                                  title="Cancel or Reject Order"
+                                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 hover:border-red-200 transition-all cursor-pointer shrink-0 min-h-[44px]"
+                                  title="Cancel or reject this order"
                                 >
-                                  <CircleX size={14} className="shrink-0" />
-                                  <span className="truncate">Reject</span>
+                                  <CircleX size={15} className="shrink-0 text-red-500" />
+                                  <span>Reject</span>
                                 </button>
-                              </>
+                              </div>
                             )}
                           </div>
 
