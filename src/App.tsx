@@ -68,7 +68,8 @@ import {
   Minus,
   Store,
   ShoppingBag,
-  Eye
+  Eye,
+  Menu
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import appLogo from "./assets/images/logo.png";
@@ -647,6 +648,20 @@ function AdminDashboard() {
   // Order Deletion states (Feature 1: Delete test/fake orders permanently)
   const [orderToDelete, setOrderToDelete] = useState<Order | null>(null);
   const [isDeletingOrder, setIsDeletingOrder] = useState<boolean>(false);
+
+  // Mobile Navigation Drawer state
+  const [showMobileDrawer, setShowMobileDrawer] = useState<boolean>(false);
+
+  // In-app Confirmation Modal states (Replaces browser-blocked window.confirm)
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [isDeletingProduct, setIsDeletingProduct] = useState<boolean>(false);
+
+  const [offerToRemove, setOfferToRemove] = useState<Product | null>(null);
+  const [isRemovingOffer, setIsRemovingOffer] = useState<boolean>(false);
+
+  const [orderToCancel, setOrderToCancel] = useState<Order | null>(null);
+  const [orderToRejectReturn, setOrderToRejectReturn] = useState<Order | null>(null);
+  const [showSignOutModal, setShowSignOutModal] = useState<boolean>(false);
 
   // Official Tax Invoice Modal state
   const [selectedOrderForInvoice, setSelectedOrderForInvoice] = useState<Order | null>(null);
@@ -1537,9 +1552,15 @@ function AdminDashboard() {
     }
   };
 
-  // Unified Sign Out with PIN verification clearance & FCM unregister
-  const handleSignOut = async () => {
-    if (window.confirm("Do you want to sign out from Zypso Mart Admin?")) {
+  // Unified Sign Out with in-app confirmation modal (no window.confirm)
+  const handleSignOut = () => {
+    setShowSignOutModal(true);
+  };
+
+  const handleConfirmSignOut = async () => {
+    setShowSignOutModal(false);
+    setShowMobileDrawer(false);
+    try {
       if (user) {
         clearPinVerification(user.uid);
       }
@@ -1549,6 +1570,9 @@ function AdminDashboard() {
       setIsAlarmRinging(false);
       await unregisterDeviceToken().catch(() => {});
       await signOut(auth);
+    } catch (err: any) {
+      console.warn("[SignOut] Error signing out:", err);
+      showNotification("error", "Error signing out: " + (err.message || String(err)));
     }
   };
 
@@ -1725,6 +1749,30 @@ function AdminDashboard() {
     } finally {
       setIsDeletingOrder(false);
     }
+  };
+
+  // Handler: Confirmed cancel / reject order
+  const handleConfirmCancelOrder = async () => {
+    if (!orderToCancel) return;
+    const ord = orderToCancel;
+    setOrderToCancel(null);
+    await handleUpdateOrderStatus(
+      ord.id,
+      "cancelled",
+      `Order #${ord.id.slice(-6).toUpperCase()} Cancelled Successfully`
+    );
+  };
+
+  // Handler: Confirmed reject return request
+  const handleConfirmRejectReturn = async () => {
+    if (!orderToRejectReturn) return;
+    const ord = orderToRejectReturn;
+    setOrderToRejectReturn(null);
+    await handleUpdateOrderStatus(
+      ord.id,
+      "return_rejected",
+      `Return request for Order #${ord.id.slice(-6).toUpperCase()} Rejected Successfully`
+    );
   };
 
   /**
@@ -2329,37 +2377,48 @@ function AdminDashboard() {
     }
   };
 
-  // Delete Product with optimistic cache sync & server fallback
-  const handleDeleteProduct = async (productId: string) => {
+  // Delete Product trigger: opens in-app confirmation modal (no window.confirm)
+  const handleDeleteProduct = (productId: string) => {
     const product = products.find((p) => p.id === productId);
-    const prodName = product?.name || "Product";
-    if (window.confirm(`Are you sure you want to delete "${prodName}" from the store catalog?`)) {
-      try {
-        setProducts((prev) => {
-          const next = prev.filter((p) => p.id !== productId);
-          try {
-            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
-          } catch {}
-          return next;
-        });
+    if (product) {
+      setProductToDelete(product);
+    }
+  };
 
-        // Direct Firestore delete
+  // Confirmed Delete Product handler
+  const handleConfirmDeleteProduct = async () => {
+    if (!productToDelete) return;
+    const productId = productToDelete.id;
+    const prodName = productToDelete.name || "Product";
+    setIsDeletingProduct(true);
+    try {
+      setProducts((prev) => {
+        const next = prev.filter((p) => p.id !== productId);
         try {
-          await deleteDoc(doc(db, "products", productId));
-        } catch (fsErr) {
-          console.warn("[Product Delete] Firestore direct delete notice:", fsErr);
-        }
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
 
-        // Server API sync
-        await fetch(`/api/products/${encodeURIComponent(productId)}`, {
-          method: "DELETE"
-        }).catch(() => {});
-
-        showNotification("success", `Product "${prodName}" deleted successfully`);
-      } catch (err: any) {
-        showNotification("error", "Delete failed: " + err.message);
-        fetchProducts(true);
+      // 1. Direct Firestore delete
+      try {
+        await deleteDoc(doc(db, "products", productId));
+      } catch (fsErr) {
+        console.warn("[Product Delete] Firestore direct delete notice:", fsErr);
       }
+
+      // 2. Server API sync
+      await fetch(`/api/products/${encodeURIComponent(productId)}`, {
+        method: "DELETE"
+      }).catch(() => {});
+
+      showNotification("success", `Product "${prodName}" deleted successfully`);
+      setProductToDelete(null);
+    } catch (err: any) {
+      showNotification("error", "Delete failed: " + err.message);
+      fetchProducts(true);
+    } finally {
+      setIsDeletingProduct(false);
     }
   };
 
@@ -2462,54 +2521,60 @@ function AdminDashboard() {
     }
   };
 
-  // Remove Offer from a product (Preserves original catalog product at regular price)
-  const handleRemoveOffer = async (productId: string) => {
+  // Remove Offer trigger: opens in-app confirmation modal (no window.confirm)
+  const handleRemoveOffer = (productId: string) => {
     const product = products.find((p) => p.id === productId);
-    if (!product) return;
+    if (product) {
+      setOfferToRemove(product);
+    }
+  };
 
-    if (
-      window.confirm(
-        `Remove offer from "${product.name}"? The product will remain in your catalog at regular price ₹${product.price}.`
-      )
-    ) {
+  // Confirmed Remove Offer handler
+  const handleConfirmRemoveOffer = async () => {
+    if (!offerToRemove) return;
+    const product = offerToRemove;
+    const productId = product.id;
+    setIsRemovingOffer(true);
+    try {
+      const resetPayload = {
+        isOffer: false,
+        offerType: null,
+        offerValue: 0,
+        offerPrice: product.price,
+        offerStartDate: null,
+        offerEndDate: null,
+        offerEnabled: false,
+        updatedAt: new Date().toISOString()
+      };
+
+      // 1. Direct Firestore setDoc with merge: true (zero undefined fields)
       try {
-        const resetPayload = {
-          isOffer: false,
-          offerType: null,
-          offerValue: 0,
-          offerPrice: product.price,
-          offerStartDate: null,
-          offerEndDate: null,
-          offerEnabled: false,
-          updatedAt: new Date().toISOString()
-        };
-
-        // 1. Direct Firestore setDoc with merge: true (zero undefined fields)
-        try {
-          await setDoc(doc(db, "products", productId), resetPayload, { merge: true });
-        } catch (fsErr: any) {
-          console.warn("[Offer Remove] Direct Firestore update notice:", fsErr?.message || fsErr);
-        }
-
-        // 2. Server API sync
-        await fetch(`/api/products/${encodeURIComponent(productId)}/offer`, {
-          method: "DELETE"
-        }).catch(() => {});
-
-        setProducts((prev) => {
-          const next = prev.map((p) =>
-            p.id === productId ? { ...p, ...resetPayload } : p
-          );
-          try {
-            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
-          } catch {}
-          return next;
-        });
-
-        showNotification("success", `Offer removed from "${product.name}". Regular price ₹${product.price} restored.`);
-      } catch (err: any) {
-        showNotification("error", "Error removing offer: " + err.message);
+        await setDoc(doc(db, "products", productId), resetPayload, { merge: true });
+      } catch (fsErr: any) {
+        console.warn("[Offer Remove] Direct Firestore update notice:", fsErr?.message || fsErr);
       }
+
+      // 2. Server API sync
+      await fetch(`/api/products/${encodeURIComponent(productId)}/offer`, {
+        method: "DELETE"
+      }).catch(() => {});
+
+      setProducts((prev) => {
+        const next = prev.map((p) =>
+          p.id === productId ? { ...p, ...resetPayload } : p
+        );
+        try {
+          localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+
+      showNotification("success", `Offer removed from "${product.name}". Regular price ₹${product.price} restored.`);
+      setOfferToRemove(null);
+    } catch (err: any) {
+      showNotification("error", "Error removing offer: " + err.message);
+    } finally {
+      setIsRemovingOffer(false);
     }
   };
 
@@ -3295,8 +3360,19 @@ function AdminDashboard() {
         {/* Header (Fixed / Sticky while scrolling) */}
         <header className="bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-3 sm:px-6 py-3 sm:py-4 sticky top-0 z-30 shadow-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4">
-            <div className="flex items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+            <div className="flex items-center justify-between gap-2 sm:gap-2.5">
+              <div className="flex items-center gap-2 sm:gap-3.5 min-w-0">
+                {/* Mobile Navigation Drawer Hamburger Button */}
+                <button
+                  type="button"
+                  onClick={() => setShowMobileDrawer(true)}
+                  className="md:hidden p-2 rounded-xl border border-slate-200 hover:bg-slate-100 text-slate-700 transition-colors cursor-pointer shrink-0 min-h-[40px] min-w-[40px] flex items-center justify-center active:scale-95"
+                  title="Open Admin Navigation Menu"
+                  aria-label="Open Admin Menu"
+                >
+                  <Menu size={20} />
+                </button>
+
                 <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl sm:rounded-2xl bg-gradient-to-br from-emerald-50 via-amber-50 to-orange-50 p-1 border border-emerald-100 shadow-sm flex items-center justify-center shrink-0 overflow-hidden group hover:scale-105 transition-transform">
                   <img
                     src={appLogo}
@@ -3321,27 +3397,8 @@ function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Shop Status & Header Controls */}
+              {/* Header Controls */}
               <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-                <button
-                  onClick={() => handleUpdateShopStatus(!isShopOpen)}
-                  disabled={isUpdatingShopStatus}
-                  className={`flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-xl text-xs font-black transition-all cursor-pointer border shadow-2xs shrink-0 ${
-                    isShopOpen
-                      ? "bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
-                      : "bg-red-50 text-red-800 border-red-300 hover:bg-red-100 ring-2 ring-red-200 animate-pulse"
-                  }`}
-                  title={isShopOpen ? "Store is OPEN. Click to switch to CLOSED." : "Store is CLOSED. Click to switch to OPEN."}
-                >
-                  <span
-                    className={`w-2 h-2 rounded-full shrink-0 ${
-                      isShopOpen
-                        ? "bg-emerald-500 shadow-xs shadow-emerald-500/50"
-                        : "bg-red-600 shadow-xs shadow-red-600/50 animate-ping"
-                    }`}
-                  />
-                  <span className="text-[11px] font-black">{isShopOpen ? "OPEN" : "CLOSED"}</span>
-                </button>
 
                 <button
                   onClick={() => setShowAlarmSettingsModal(true)}
@@ -3429,16 +3486,6 @@ function AdminDashboard() {
                 </button>
               )}
 
-              {/* Live Customer Store Preview & Test Checkout Trigger */}
-              <button
-                onClick={() => setShowCustomerPreviewModal(true)}
-                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/90 rounded-xl font-bold transition-all text-xs sm:text-sm shrink-0 cursor-pointer active:scale-95 shadow-2xs"
-                title="Preview live customer store and test checkout with active offers"
-              >
-                <Eye size={15} className="stroke-[2.5]" />
-                <span className="hidden sm:inline">Customer Store Preview</span>
-                <span className="sm:hidden">Preview</span>
-              </button>
 
               {activeTab === "products" && (
                 <button
@@ -3998,7 +4045,7 @@ function AdminDashboard() {
                     </button>
                   </div>
 
-                  <form onSubmit={handleSaveOffer} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
+                  <form onSubmit={handleSaveOffer} noValidate className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
                     {/* Product Summary banner */}
                     <div className="bg-slate-50 rounded-2xl p-3.5 border border-slate-200 flex items-center gap-3">
                       <div className="w-14 h-14 rounded-xl bg-white border border-slate-200 p-1 flex items-center justify-center shrink-0 overflow-hidden">
@@ -4088,9 +4135,6 @@ function AdminDashboard() {
                       <input
                         type="number"
                         step="any"
-                        required
-                        min="1"
-                        max={offerForm.offerType === "percentage" ? "99" : String(productForOffer.price - 1)}
                         placeholder={offerForm.offerType === "percentage" ? "e.g. 20" : "e.g. 15"}
                         value={offerForm.offerValue}
                         onChange={(e) => setOfferForm({ ...offerForm, offerValue: e.target.value })}
@@ -4222,7 +4266,12 @@ function AdminDashboard() {
                       <button
                         type="submit"
                         disabled={isSavingOffer}
-                        className="flex-1 py-3 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2 cursor-pointer text-sm"
+                        onClick={(e) => {
+                          if (!isSavingOffer) {
+                            handleSaveOffer(e);
+                          }
+                        }}
+                        className="flex-1 py-3 bg-amber-500 hover:bg-amber-600 active:scale-[0.98] disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-amber-100 flex items-center justify-center gap-2 cursor-pointer text-sm"
                       >
                         {isSavingOffer ? (
                           <>
@@ -4792,6 +4841,468 @@ function AdminDashboard() {
             )}
           </AnimatePresence>
 
+          {/* Mobile Sidebar Navigation Drawer */}
+          <AnimatePresence>
+            {showMobileDrawer && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[250] md:hidden bg-black/60 backdrop-blur-xs flex"
+              >
+                <motion.div
+                  initial={{ x: "-100%" }}
+                  animate={{ x: 0 }}
+                  exit={{ x: "-100%" }}
+                  transition={{ type: "spring", damping: 25, stiffness: 250 }}
+                  className="w-72 max-w-[85vw] bg-white h-full flex flex-col shadow-2xl overflow-y-auto"
+                >
+                  {/* Drawer Header */}
+                  <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-50 via-amber-50 to-orange-50 p-1 border border-emerald-100 flex items-center justify-center shrink-0 overflow-hidden">
+                        <img src={appLogo} alt="Zypso Mart" className="w-full h-full object-contain" />
+                      </div>
+                      <div>
+                        <span className="font-extrabold text-slate-900 text-sm block">Zypso Mart</span>
+                        <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest block">Admin Console</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowMobileDrawer(false)}
+                      className="p-1.5 rounded-lg hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition-colors cursor-pointer"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+
+                  {/* Navigation Items */}
+                  <nav className="flex-1 p-3 space-y-1.5 overflow-y-auto">
+                    <button
+                      onClick={() => {
+                        setActiveTab("orders");
+                        setShowMobileDrawer(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+                        activeTab === "orders"
+                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                          : "text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <ShoppingCart size={18} />
+                        <span>Orders</span>
+                      </div>
+                      {unacknowledgedOrders.length > 0 ? (
+                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-red-500 text-white animate-pulse">
+                          {unacknowledgedOrders.length} NEW
+                        </span>
+                      ) : orders.length > 0 ? (
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${activeTab === "orders" ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>
+                          {orders.length}
+                        </span>
+                      ) : null}
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setActiveTab("products");
+                        setShowMobileDrawer(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+                        activeTab === "products"
+                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                          : "text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <Package size={18} />
+                        <span>Products</span>
+                      </div>
+                      {products.length > 0 && (
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${activeTab === "products" ? "bg-white/20 text-white" : "bg-slate-100 text-slate-600"}`}>
+                          {products.length}
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setActiveTab("offers");
+                        setShowMobileDrawer(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer ${
+                        activeTab === "offers"
+                          ? "bg-emerald-600 text-white shadow-md shadow-emerald-600/20"
+                          : "text-slate-700 hover:bg-slate-100"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <BadgePercent size={18} />
+                        <span>Offers & Deals</span>
+                      </div>
+                      {offerStats.active > 0 && (
+                        <span className="text-[9px] font-black px-1.5 py-0.5 rounded-full bg-amber-500 text-white animate-pulse">
+                          {offerStats.active} LIVE
+                        </span>
+                      )}
+                    </button>
+
+
+                    <button
+                      onClick={() => {
+                        setShowAlarmSettingsModal(true);
+                        setShowMobileDrawer(false);
+                      }}
+                      className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer text-slate-700 hover:bg-slate-100"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <BellRing size={18} className={isAlarmRinging ? "text-red-600 animate-bounce" : isAlarmEnabled ? "text-emerald-600" : "text-slate-400"} />
+                        <span>Order Alarm Settings</span>
+                      </div>
+                      <span className={`text-[9px] font-black px-2 py-0.5 rounded-full uppercase ${isAlarmRinging ? "bg-red-500 text-white animate-pulse" : isAlarmEnabled ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-500"}`}>
+                        {isAlarmRinging ? "Ringing!" : isAlarmEnabled ? "Active" : "Muted"}
+                      </span>
+                    </button>
+
+                    {/* Alarm Quick Switch */}
+                    <div className={`p-2.5 rounded-xl border flex items-center justify-between mt-2 ${
+                      isAlarmRinging ? "bg-red-500 text-white border-red-600" : isAlarmEnabled ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-slate-100 text-slate-600 border-slate-200"
+                    }`}>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {isAlarmRinging ? <Volume2 size={15} className="animate-bounce shrink-0" /> : <VolumeX size={15} className="shrink-0" />}
+                        <span className="text-xs font-bold truncate">{isAlarmRinging ? "ALARM RINGING!" : "Alarm Sound"}</span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (isAlarmRinging) {
+                            alarmAudio.stopAlarm();
+                            setIsAlarmRinging(false);
+                          } else {
+                            handleToggleAlarm(!isAlarmEnabled);
+                          }
+                        }}
+                        className={`text-[9px] font-black px-2 py-0.5 rounded uppercase cursor-pointer ${
+                          isAlarmRinging ? "bg-white text-red-700 animate-bounce" : isAlarmEnabled ? "bg-emerald-600 text-white" : "bg-slate-300 text-slate-700"
+                        }`}
+                      >
+                        {isAlarmRinging ? "SILENCE" : isAlarmEnabled ? "ON" : "OFF"}
+                      </button>
+                    </div>
+
+                  </nav>
+
+                  {/* Drawer Footer */}
+                  <div className="p-3 border-t border-slate-100 bg-slate-50 space-y-2">
+                    <div className="px-3 py-2 rounded-lg bg-white border border-slate-100">
+                      <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Signed in as</p>
+                      <p className="text-xs font-bold text-slate-800 truncate">{user.email}</p>
+                      <div className="flex items-center gap-1.5 mt-1 pt-1 border-t border-slate-100">
+                        <span className={`w-2 h-2 rounded-full ${syncStatus === "connected" ? "bg-emerald-500 animate-pulse" : "bg-amber-500"}`} />
+                        <span className="text-[9px] font-bold text-slate-500 uppercase">{syncStatus === "connected" ? "Live Sync Active" : "Connecting..."}</span>
+                      </div>
+                    </div>
+
+                    {showInstallBtn && !isAppInstalled && deferredPrompt && (
+                      <button
+                        onClick={() => {
+                          handleInstallApp();
+                          setShowMobileDrawer(false);
+                        }}
+                        className="w-full flex items-center justify-center gap-1.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow-xs cursor-pointer"
+                      >
+                        <Download size={14} className="stroke-[2.5]" />
+                        <span>Install Admin App</span>
+                      </button>
+                    )}
+
+                    <button
+                      onClick={() => {
+                        setShowMobileDrawer(false);
+                        setShowSignOutModal(true);
+                      }}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 text-red-600 hover:bg-red-50 rounded-xl font-bold text-xs transition-colors cursor-pointer border border-red-200"
+                    >
+                      <LogOut size={16} />
+                      <span>Sign Out</span>
+                    </button>
+                  </div>
+                </motion.div>
+                <div className="flex-1" onClick={() => setShowMobileDrawer(false)} />
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Modal 1: Product Deletion Confirmation */}
+          <AnimatePresence>
+            {productToDelete && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-4 shadow-sm">
+                    <Trash2 size={26} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Delete this product?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    This will permanently delete{" "}
+                    <span className="font-bold text-slate-800">"{productToDelete.name}"</span> (₹{productToDelete.price}) from the catalog.
+                    <br />
+                    <span className="text-red-600 font-semibold">This action cannot be undone.</span>
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      disabled={isDeletingProduct}
+                      onClick={() => setProductToDelete(null)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isDeletingProduct}
+                      onClick={handleConfirmDeleteProduct}
+                      className="py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs rounded-xl shadow-md shadow-red-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
+                    >
+                      {isDeletingProduct ? (
+                        <>
+                          <RefreshCcw size={14} className="animate-spin" />
+                          <span>Deleting...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 size={14} />
+                          <span>Delete</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Modal 2: Remove Offer Confirmation */}
+          <AnimatePresence>
+            {offerToRemove && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-600 mx-auto mb-4 shadow-sm">
+                    <BadgePercent size={26} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Remove from Offer List?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    Remove the discount offer from{" "}
+                    <span className="font-bold text-slate-800">"{offerToRemove.name}"</span>?
+                    <br />
+                    <span className="text-emerald-700 font-bold">The original product remains in your store catalog at regular price ₹{offerToRemove.price}.</span>
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      disabled={isRemovingOffer}
+                      onClick={() => setOfferToRemove(null)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isRemovingOffer}
+                      onClick={handleConfirmRemoveOffer}
+                      className="py-2.5 px-4 bg-amber-600 hover:bg-amber-700 text-white font-black text-xs rounded-xl shadow-md shadow-amber-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95 disabled:opacity-50"
+                    >
+                      {isRemovingOffer ? (
+                        <>
+                          <RefreshCcw size={14} className="animate-spin" />
+                          <span>Removing...</span>
+                        </>
+                      ) : (
+                        <>
+                          <X size={14} />
+                          <span>Remove Offer</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Modal 3: Reject / Cancel Order Confirmation */}
+          <AnimatePresence>
+            {orderToCancel && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-4 shadow-sm">
+                    <CircleX size={26} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Reject / Cancel Order?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    Cancel Order{" "}
+                    <span className="font-mono font-bold text-slate-900">
+                      #{orderToCancel.id.slice(-6).toUpperCase()}
+                    </span>{" "}
+                    ({orderToCancel.customerName} • ₹{(orderToCancel.total || 0).toLocaleString()})?
+                    <br />
+                    <span className="text-slate-600">The customer app will show this order as cancelled.</span>
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setOrderToCancel(null)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Keep Order
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmCancelOrder}
+                      className="py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs rounded-xl shadow-md shadow-red-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                    >
+                      <CircleX size={14} />
+                      <span>Reject Order</span>
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Modal 4: Reject Return Request Confirmation */}
+          <AnimatePresence>
+            {orderToRejectReturn && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[210] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-4 shadow-sm">
+                    <AlertTriangle size={26} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Reject Return Request?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    Reject return request for Order{" "}
+                    <span className="font-mono font-bold text-slate-900">
+                      #{orderToRejectReturn.id.slice(-6).toUpperCase()}
+                    </span>?
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setOrderToRejectReturn(null)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmRejectReturn}
+                      className="py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs rounded-xl shadow-md shadow-red-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                    >
+                      <CircleX size={14} />
+                      <span>Reject Return</span>
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Modal 5: Sign Out Confirmation */}
+          <AnimatePresence>
+            {showSignOutModal && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[220] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  exit={{ scale: 0.95, opacity: 0 }}
+                  className="bg-white rounded-3xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+                >
+                  <div className="w-14 h-14 bg-red-100 rounded-2xl flex items-center justify-center text-red-600 mx-auto mb-4 shadow-sm">
+                    <LogOut size={26} />
+                  </div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight mb-1">
+                    Sign Out of Admin Console?
+                  </h3>
+                  <p className="text-xs text-slate-500 mb-4 leading-relaxed">
+                    You are currently signed in as{" "}
+                    <span className="font-bold text-slate-800">{user?.email}</span>.
+                    <br />
+                    You will need to re-enter your admin PIN to access this dashboard.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowSignOutModal(false)}
+                      className="py-2.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+                    >
+                      Stay Signed In
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmSignOut}
+                      className="py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white font-black text-xs rounded-xl shadow-md shadow-red-600/30 transition-all cursor-pointer flex items-center justify-center gap-1.5 active:scale-95"
+                    >
+                      <LogOut size={14} />
+                      <span>Sign Out</span>
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Official Tax Invoice Modal (View, Download, Print) */}
           <AnimatePresence>
             {selectedOrderForInvoice && (
@@ -5069,80 +5580,7 @@ function AdminDashboard() {
           ) : activeTab === "orders" ? (
             /* TAB 1: ORDERS DASHBOARD */
             <div className="space-y-6 pb-24">
-              {/* Feature 2: Shop Closed Alert Banner */}
-              {!isShopOpen && (
-                <div className="bg-gradient-to-r from-red-600 via-rose-600 to-red-700 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-red-600/25 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-red-500/50 animate-pulse">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-12 h-12 bg-white/20 backdrop-blur-xs rounded-2xl flex items-center justify-center text-2xl shrink-0 shadow-inner">
-                      🔴
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h4 className="font-black text-base tracking-tight leading-tight">
-                          SHOP IS CURRENTLY CLOSED
-                        </h4>
-                        <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-white text-red-700 rounded-full">
-                          Store Inactive
-                        </span>
-                      </div>
-                      <p className="text-xs text-white/90 mt-0.5">
-                        Customer App displays "🔴 SHOP CLOSED". Customers cannot place new orders until you reopen the shop.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => handleUpdateShopStatus(true)}
-                      disabled={isUpdatingShopStatus}
-                      className="px-4 py-2 bg-white text-emerald-800 hover:bg-emerald-50 font-black text-xs rounded-xl shadow-xs transition-all cursor-pointer flex items-center gap-1.5"
-                    >
-                      <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                      <span>Switch to SHOP OPEN</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Unacknowledged New Orders Alert Banner */}
-              {unacknowledgedOrders.length > 0 && (
-                <div className="bg-gradient-to-r from-red-600 via-rose-600 to-amber-600 rounded-2xl p-4 sm:p-5 text-white shadow-lg shadow-red-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-red-400/30">
-                  <div className="flex items-center gap-3.5">
-                    <div className="w-12 h-12 bg-white/20 backdrop-blur-xs rounded-2xl flex items-center justify-center text-2xl shrink-0 shadow-inner">
-                      🚨
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <h4 className="font-black text-base tracking-tight leading-tight">
-                          {unacknowledgedOrders.length} New Order{unacknowledgedOrders.length === 1 ? "" : "s"} Received
-                        </h4>
-                        <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-white text-red-700 rounded-full animate-pulse">
-                          Unacknowledged
-                        </span>
-                      </div>
-                      <p className="text-xs text-white/90 mt-0.5">
-                        New orders detected while app was closed or in background. Review and acknowledge to stop pending status.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      onClick={() => {
-                        setStatusFilter("pending");
-                        handleSetSearch("");
-                      }}
-                      className="px-4 py-2 bg-white text-red-700 hover:bg-slate-100 font-black text-xs rounded-xl shadow-xs transition-all cursor-pointer"
-                    >
-                      View Pending ({unacknowledgedOrders.length})
-                    </button>
-                    <button
-                      onClick={handleAcknowledgeAll}
-                      className="px-3.5 py-2 bg-black/25 hover:bg-black/35 text-white font-bold text-xs rounded-xl transition-all cursor-pointer border border-white/20"
-                    >
-                      Acknowledge All
-                    </button>
-                  </div>
-                </div>
-              )}
+              {/* Orders View */}
 
               {/* Stat Cards - 3 Main Summary Statistics */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 sm:gap-4 lg:gap-5">
@@ -5622,19 +6060,7 @@ function AdminDashboard() {
 
                                 <button
                                   disabled={isUpdating || isReturnRejected}
-                                  onClick={() => {
-                                    if (
-                                      window.confirm(
-                                        "Are you sure you want to reject this return request?"
-                                      )
-                                    ) {
-                                      handleUpdateOrderStatus(
-                                        order.id,
-                                        "return_rejected",
-                                        "Return Request Rejected Successfully"
-                                      );
-                                    }
-                                  }}
+                                  onClick={() => setOrderToRejectReturn(order)}
                                   className={`col-span-1 flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider transition-all cursor-pointer min-h-[44px] ${
                                     isReturnRejected
                                       ? "bg-red-100 text-red-800 border border-red-200/50 cursor-not-allowed opacity-60"
@@ -5768,20 +6194,8 @@ function AdminDashboard() {
                                 {/* Secondary Action: Reject / Cancel Button */}
                                 <button
                                   disabled={isUpdating}
-                                  onClick={() => {
-                                    if (
-                                      window.confirm(
-                                        `Are you sure you want to cancel / reject Order #${order.id.slice(-6).toUpperCase()}?`
-                                      )
-                                    ) {
-                                      handleUpdateOrderStatus(
-                                        order.id,
-                                        "cancelled",
-                                        "Order Cancelled Successfully"
-                                      );
-                                    }
-                                  }}
-                                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 hover:border-red-200 transition-all cursor-pointer shrink-0 min-h-[44px]"
+                                  onClick={() => setOrderToCancel(order)}
+                                  className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl font-bold text-xs uppercase tracking-wider bg-slate-100 hover:bg-red-50 text-slate-600 hover:text-red-700 border border-slate-200 hover:border-red-200 transition-all cursor-pointer shrink-0 min-h-[44px] active:scale-[0.98]"
                                   title="Cancel or reject this order"
                                 >
                                   <CircleX size={15} className="shrink-0 text-red-500" />
