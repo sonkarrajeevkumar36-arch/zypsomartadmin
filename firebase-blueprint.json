@@ -32,6 +32,31 @@
         "createdAt": { "type": "string" }
       },
       "required": ["status", "total"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Store inventory product item with pricing and offer configuration",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "price": { "type": "number" },
+        "unit": { "type": "string" },
+        "image": { "type": "string" },
+        "imageUrl": { "type": "string" },
+        "description": { "type": "string" },
+        "isAvailable": { "type": "boolean" },
+        "isOffer": { "type": "boolean" },
+        "offerType": { "type": "string", "enum": ["percentage", "fixed"] },
+        "offerValue": { "type": "number" },
+        "offerPrice": { "type": "number" },
+        "offerStartDate": { "type": "string" },
+        "offerEndDate": { "type": "string" },
+        "offerEnabled": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "category", "price", "isAvailable"]
     }
   },
   "firestore": {
@@ -42,6 +67,10 @@
     "/orders/{orderId}": {
       "schema": "Order",
       "description": "Customer orders with admin management and deletion capabilities"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Product catalog items with pricing, inventory availability, and promotional offers"
     }
   }
 }

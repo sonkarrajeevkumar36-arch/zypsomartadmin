@@ -30,7 +30,8 @@ import {
   deleteProductController,
   setProductOfferController,
   removeProductOfferController,
-  listCategoriesController
+  listCategoriesController,
+  addCategoryController
 } from "./server/productController.js";
 
 async function startServer() {
@@ -70,6 +71,7 @@ async function startServer() {
 
   // Category API with fallback presets
   app.get("/api/categories", listCategoriesController);
+  app.post("/api/categories", addCategoryController);
 
   // Shop Open / Closed Status API (for Admin & Customer Apps)
   app.get("/api/shop/status", getShopStatusController);

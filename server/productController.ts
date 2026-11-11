@@ -128,7 +128,7 @@ async function syncProductToFirestore(
     }
 
     // 2. Try Firestore REST API
-    const url = `${FIRESTORE_REST_BASE}/products/${encodeURIComponent(productId)}?key=${FIREBASE_API_KEY}`;
+    const baseUrl = `${FIRESTORE_REST_BASE}/products/${encodeURIComponent(productId)}?key=${FIREBASE_API_KEY}`;
     const firestoreFields: Record<string, any> = {};
 
     for (const [key, val] of Object.entries(productData)) {
@@ -146,16 +146,24 @@ async function syncProductToFirestore(
       }
     }
 
+    const fieldKeys = Object.keys(firestoreFields);
+    const maskQuery = fieldKeys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join("&");
+    const fullUrl = maskQuery ? `${baseUrl}&${maskQuery}` : baseUrl;
+
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (authToken) {
       headers["Authorization"] = authToken;
     }
 
-    await fetch(url, {
+    const restRes = await fetch(fullUrl, {
       method: "PATCH",
       headers,
       body: JSON.stringify({ fields: firestoreFields })
     });
+    if (!restRes.ok && restRes.status !== 404) {
+      const restErr = await restRes.text().catch(() => "");
+      console.warn(`[ProductController] Cloud sync response (HTTP ${restRes.status}):`, restErr.slice(0, 200));
+    }
   } catch (err: any) {
     console.warn(`[ProductController] Firestore cloud sync notice for product ${productId}:`, err?.message || err);
   }
@@ -529,30 +537,101 @@ export async function removeProductOfferController(req: Request, res: Response):
 }
 
 /**
- * Controller: List Categories with presets fallback
+/**
+ * Controller: List Categories with presets fallback & dynamically extracted product categories
  * GET /api/categories
  */
 export async function listCategoriesController(req: Request, res: Response): Promise<void> {
   try {
-    let categories = DEFAULT_PRESET_CATEGORIES.map((name, i) => ({
-      id: `cat_${i + 1}`,
-      name
-    }));
+    const catMap = new Map<string, { id: string; name: string; icon?: string }>();
 
+    // 1. Load from CATEGORIES_FILE if present
     if (fs.existsSync(CATEGORIES_FILE)) {
       try {
         const fileContent = fs.readFileSync(CATEGORIES_FILE, "utf8");
         const parsed = JSON.parse(fileContent);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          categories = parsed;
+        if (Array.isArray(parsed)) {
+          parsed.forEach((c) => {
+            const name = String(c.name || "").trim();
+            if (name) {
+              catMap.set(name.toLowerCase(), {
+                id: c.id || `cat_${name.toLowerCase()}`,
+                name: name,
+                icon: c.icon || ""
+              });
+            }
+          });
         }
       } catch {}
     }
+
+    // 2. Discover all categories from loaded products in memory
+    for (const p of productsCache.values()) {
+      const pCat = String(p.category || "").trim();
+      if (pCat && !catMap.has(pCat.toLowerCase())) {
+        catMap.set(pCat.toLowerCase(), {
+          id: `cat_prod_${encodeURIComponent(pCat.toLowerCase())}`,
+          name: pCat
+        });
+      }
+    }
+
+    // 3. Fallback presets if empty
+    if (catMap.size === 0) {
+      DEFAULT_PRESET_CATEGORIES.forEach((name, i) => {
+        catMap.set(name.toLowerCase(), {
+          id: `preset_cat_${i + 1}`,
+          name
+        });
+      });
+    }
+
+    const categories = Array.from(catMap.values()).sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+    );
 
     res.status(200).json({
       success: true,
       categories
     });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+}
+
+/**
+ * Controller: Add a category
+ * POST /api/categories
+ */
+export async function addCategoryController(req: Request, res: Response): Promise<void> {
+  try {
+    const name = String(req.body.name || "").trim();
+    if (!name) {
+      res.status(400).json({ success: false, error: "Category name is required." });
+      return;
+    }
+
+    let list: Array<{ id: string; name: string; icon?: string }> = [];
+    if (fs.existsSync(CATEGORIES_FILE)) {
+      try {
+        list = JSON.parse(fs.readFileSync(CATEGORIES_FILE, "utf8"));
+      } catch {}
+    }
+
+    const exists = list.some((c) => c.name.toLowerCase() === name.toLowerCase());
+    if (!exists) {
+      const newCat = {
+        id: `cat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name,
+        icon: req.body.icon || "📦"
+      };
+      list.push(newCat);
+      fs.writeFileSync(CATEGORIES_FILE, JSON.stringify(list, null, 2), "utf8");
+      res.status(201).json({ success: true, category: newCat });
+      return;
+    }
+
+    res.status(200).json({ success: true, message: "Category already exists." });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }

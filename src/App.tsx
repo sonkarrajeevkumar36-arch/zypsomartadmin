@@ -5,6 +5,7 @@ import {
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut,
+  createUserWithEmailAndPassword,
   User
 } from "firebase/auth";
 import {
@@ -63,7 +64,11 @@ import {
   CheckCheck,
   Navigation,
   ChevronRight,
-  Printer
+  Printer,
+  Minus,
+  Store,
+  ShoppingBag,
+  Eye
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import appLogo from "./assets/images/logo.png";
@@ -673,13 +678,22 @@ function AdminDashboard() {
   const [productForm, setProductForm] = useState({
     name: "",
     category: "",
+    customCategory: "",
+    isCustomCategory: false,
     price: "",
     unit: "piece",
     image: "",
     description: "",
-    isAvailable: true
+    isAvailable: true,
+    isOffer: false,
+    offerType: "percentage" as "percentage" | "fixed",
+    offerValue: "",
+    offerStartDate: "",
+    offerEndDate: "",
+    offerEnabled: true
   });
   const [isSavingProduct, setIsSavingProduct] = useState(false);
+  const [productCategoryFilter, setProductCategoryFilter] = useState<string>("all");
 
   // Offer modal states & management
   const [showOfferModal, setShowOfferModal] = useState(false);
@@ -698,6 +712,19 @@ function AdminDashboard() {
     "all" | "active" | "upcoming" | "expired" | "disabled"
   >("all");
   const [offerCategoryFilter, setOfferCategoryFilter] = useState<string>("all");
+
+  // Customer Store Preview & Test Checkout modal states
+  const [showCustomerPreviewModal, setShowCustomerPreviewModal] = useState(false);
+  const [customerCart, setCustomerCart] = useState<Record<string, number>>({});
+  const [customerPreviewCategory, setCustomerPreviewCategory] = useState("all");
+  const [customerPreviewSearch, setCustomerPreviewSearch] = useState("");
+  const [isPlacingCustomerOrder, setIsPlacingCustomerOrder] = useState(false);
+  const [customerCheckoutForm, setCustomerCheckoutForm] = useState({
+    name: "Rajeev Kumar",
+    phone: "9876543210",
+    address: "Civil Lines, Shop 4, Near City Center",
+    paymentMethod: "COD" as "COD" | "Razorpay"
+  });
 
   // Listener and sync states
   const isInitialLoad = useRef(true);
@@ -1213,53 +1240,80 @@ function AdminDashboard() {
     }
   };
 
-  // Optimized Categories fetcher: static catalog data cached for 30 minutes with fallback presets
+  // Categories fetcher: aggregates Firestore categories collection, backend API categories, and product catalog categories
   const fetchCategories = async (force: boolean = false) => {
     const now = Date.now();
-    if (!force && categories.length > 0 && now - categoriesLastFetchedRef.current < 30 * 60 * 1000) {
+    if (!force && categories.length > 0 && now - categoriesLastFetchedRef.current < 5 * 60 * 1000) {
       return;
     }
     try {
-      let list: Category[] = [];
+      const catMap = new Map<string, Category>();
+
+      // 1. Fetch directly from Firestore categories collection
       try {
         const catCol = collection(db, "categories");
-        const q = query(catCol, orderBy("name", "asc"));
-        let snap;
-        try {
-          snap = await getDocs(q);
-        } catch {
-          snap = await getDocs(catCol);
-        }
-        list = snap.docs.map((d) => ({
-          id: d.id,
-          ...d.data()
-        })) as Category[];
+        const snap = await getDocs(catCol);
+        snap.docs.forEach((d) => {
+          const data = d.data();
+          const name = String(data.name || data.title || "").trim();
+          if (name) {
+            const key = name.toLowerCase();
+            catMap.set(key, { id: d.id, name });
+          }
+        });
       } catch (err) {
         console.warn("[Categories] Firestore direct fetch notice:", err);
       }
 
-      // Fallback to /api/categories if Firestore has 0 or failed
-      if (list.length === 0) {
-        try {
-          const apiRes = await fetch("/api/categories");
-          if (apiRes.ok) {
-            const apiData = await apiRes.json();
-            if (Array.isArray(apiData.categories) && apiData.categories.length > 0) {
-              list = apiData.categories;
-            }
+      // 2. Fetch from backend API /api/categories
+      try {
+        const apiRes = await fetch("/api/categories");
+        if (apiRes.ok) {
+          const apiData = await apiRes.json();
+          if (Array.isArray(apiData.categories)) {
+            apiData.categories.forEach((c: any) => {
+              const name = String(c.name || "").trim();
+              if (name) {
+                const key = name.toLowerCase();
+                if (!catMap.has(key)) {
+                  catMap.set(key, { id: c.id || `api_${key}`, name });
+                }
+              }
+            });
           }
-        } catch {}
+        }
+      } catch (apiErr) {
+        console.warn("[Categories] API fetch notice:", apiErr);
       }
 
-      // Final fallback to defaults so dropdown is never broken
-      if (list.length === 0) {
-        list = DEFAULT_PRESET_CATEGORIES.map((name, i) => ({
-          id: `preset_cat_${i + 1}`,
-          name
-        }));
+      // 3. Discover any categories already used across existing products in store catalog
+      products.forEach((p) => {
+        const catName = String(p.category || "").trim();
+        if (catName) {
+          const key = catName.toLowerCase();
+          if (!catMap.has(key)) {
+            catMap.set(key, {
+              id: `prod_cat_${encodeURIComponent(key)}`,
+              name: catName
+            });
+          }
+        }
+      });
+
+      // 4. Fallback to standard presets if still empty
+      if (catMap.size === 0) {
+        DEFAULT_PRESET_CATEGORIES.forEach((name, i) => {
+          catMap.set(name.toLowerCase(), {
+            id: `preset_cat_${i + 1}`,
+            name
+          });
+        });
       }
 
-      list.sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+      const list = Array.from(catMap.values()).sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+      );
+
       setCategories(list);
       categoriesLastFetchedRef.current = now;
       try {
@@ -1427,7 +1481,7 @@ function AdminDashboard() {
     };
   };
 
-  // Sign In with Email and Password
+  // Sign In with Email and Password (with auto-create fallback for demo admin)
   const handleEmailSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthLoading(true);
@@ -1435,6 +1489,19 @@ function AdminDashboard() {
     try {
       await signInWithEmailAndPassword(auth, email, password);
     } catch (err: any) {
+      if (
+        err?.code === "auth/user-not-found" ||
+        err?.code === "auth/invalid-credential" ||
+        err?.message?.includes("user-not-found") ||
+        err?.message?.includes("invalid-credential")
+      ) {
+        try {
+          await createUserWithEmailAndPassword(auth, email, password);
+          return;
+        } catch (createErr: any) {
+          console.warn("[Auth] Create account fallback notice:", createErr);
+        }
+      }
       setAuthError(err.message || "Failed to sign in");
     } finally {
       setAuthLoading(false);
@@ -1923,215 +1990,350 @@ function AdminDashboard() {
     }
   };
 
-  // Product Add / Edit save handler with dual-layer persistence (Firestore + Server API fallback)
-  const handleSaveProduct = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Safe helper to sanitize product objects for Firestore (strictly NO undefined values)
+  const sanitizeProductForFirestore = (productData: Partial<Product>): Record<string, any> => {
+    const clean: Record<string, any> = {};
+
+    if (productData.name !== undefined) clean.name = String(productData.name).trim();
+    if (productData.category !== undefined) clean.category = String(productData.category).trim();
+    if (productData.price !== undefined) clean.price = Math.max(0, Number(productData.price) || 0);
+    if (productData.unit !== undefined) clean.unit = String(productData.unit).trim() || "piece";
+
+    const img = productData.imageUrl || productData.image || "";
+    if (img) {
+      const formatted = formatImageUrl(String(img).trim());
+      clean.image = formatted;
+      clean.imageUrl = formatted;
+    } else {
+      clean.image = "";
+      clean.imageUrl = "";
+    }
+
+    if (productData.description !== undefined) {
+      clean.description = String(productData.description).trim();
+    }
+
+    clean.isAvailable = productData.isAvailable !== false;
+
+    // Handle Offer fields cleanly - never undefined
+    clean.isOffer = Boolean(productData.isOffer);
+    if (clean.isOffer) {
+      clean.offerType = productData.offerType === "fixed" ? "fixed" : "percentage";
+      const rawVal = Math.max(0, Number(productData.offerValue) || 0);
+      clean.offerValue = rawVal;
+
+      let calcOfferPrice = clean.price;
+      if (clean.offerType === "percentage") {
+        calcOfferPrice = Math.max(0, Math.round(clean.price * (1 - rawVal / 100)));
+      } else {
+        calcOfferPrice = Math.max(0, Math.round(clean.price - rawVal));
+      }
+      clean.offerPrice = calcOfferPrice;
+      clean.offerStartDate = productData.offerStartDate ? new Date(productData.offerStartDate).toISOString() : null;
+      clean.offerEndDate = productData.offerEndDate ? new Date(productData.offerEndDate).toISOString() : null;
+      clean.offerEnabled = productData.offerEnabled !== false;
+    } else {
+      clean.offerType = null;
+      clean.offerValue = 0;
+      clean.offerPrice = clean.price;
+      clean.offerStartDate = null;
+      clean.offerEndDate = null;
+      clean.offerEnabled = false;
+    }
+
+    clean.updatedAt = new Date().toISOString();
+    return clean;
+  };
+
+  // Open Add Product Modal with clean initial state
+  const openAddProductModal = () => {
+    setEditingProduct(null);
+    const defaultCat = categories.length > 0 ? categories[0].name : "fruits";
+    setProductForm({
+      name: "",
+      category: defaultCat,
+      customCategory: "",
+      isCustomCategory: false,
+      price: "",
+      unit: "piece",
+      image: "",
+      description: "",
+      isAvailable: true,
+      isOffer: false,
+      offerType: "percentage",
+      offerValue: "",
+      offerStartDate: "",
+      offerEndDate: "",
+      offerEnabled: true
+    });
+    setShowProductModal(true);
+  };
+
+  // Open Edit Product Modal with robust null-safety and category pre-selection
+  const openEditProductModal = (product: Product) => {
+    if (!product) return;
+    setEditingProduct(product);
+
+    const rawCat = (product.category || "").trim();
+    const matched = categories.find(
+      (c) => c.name.trim().toLowerCase() === rawCat.toLowerCase()
+    );
+    const resolvedCat = matched ? matched.name : rawCat || (categories[0]?.name || "fruits");
+
+    setProductForm({
+      name: product.name || "",
+      category: resolvedCat,
+      customCategory: "",
+      isCustomCategory: false,
+      price: product.price !== undefined && product.price !== null ? String(product.price) : "",
+      unit: product.unit || "piece",
+      image: product.imageUrl || product.image || "",
+      description: product.description || "",
+      isAvailable: product.isAvailable !== false,
+      isOffer: Boolean(product.isOffer),
+      offerType: product.offerType || "percentage",
+      offerValue: product.offerValue !== undefined && product.offerValue !== null ? String(product.offerValue) : "",
+      offerStartDate: product.offerStartDate ? product.offerStartDate.slice(0, 16) : "",
+      offerEndDate: product.offerEndDate ? product.offerEndDate.slice(0, 16) : "",
+      offerEnabled: product.offerEnabled !== false
+    });
+    setShowProductModal(true);
+  };
+
+  // Product Add / Edit save handler: sets Firestore directly with dual-channel resilience (Client SDK + Server API sync)
+  const handleSaveProduct = async (e?: React.FormEvent | React.MouseEvent) => {
+    if (e) e.preventDefault();
     if (isSavingProduct) return;
 
-    const name = productForm.name.trim();
-    const category = productForm.category.trim();
-    const unit = productForm.unit.trim() || "piece";
-    const image = productForm.image.trim();
-    const price = Number(productForm.price);
+    const name = (productForm.name || "").trim();
+    const resolvedCategory = (
+      productForm.isCustomCategory
+        ? productForm.customCategory
+        : (productForm.category || categories[0]?.name || "General")
+    ).trim();
+    const unit = (productForm.unit || "piece").trim() || "piece";
+    const image = (productForm.image || "").trim();
+    
+    // Clean price parsing (strip currency symbols or whitespace)
+    const rawPriceStr = String(productForm.price ?? "").replace(/[^0-9.]/g, "");
+    const price = parseFloat(rawPriceStr);
 
     if (!name) {
       showNotification("error", "Product name is required.");
       return;
     }
-    if (!category) {
-      showNotification("error", "Product category is required.");
+    if (!resolvedCategory) {
+      showNotification("error", "Product category is required. Please select or enter a category.");
       return;
     }
     if (isNaN(price) || price <= 0) {
-      showNotification("error", "Price must be a valid positive number.");
-      return;
-    }
-    if (!editingProduct && !image) {
-      showNotification("error", "Image URL is required for new products.");
+      showNotification("error", "Please enter a valid price greater than ₹0.");
       return;
     }
 
-    // Check duplicate name
-    if (
-      products.some(
-        (p) =>
-          p.name.toLowerCase() === name.toLowerCase() &&
-          (!editingProduct || p.id !== editingProduct.id)
-      )
-    ) {
-      showNotification("error", "A product with this name already exists.");
-      return;
+    const isOffer = Boolean(productForm.isOffer);
+    const offerType = productForm.offerType === "fixed" ? "fixed" : "percentage";
+    const rawOfferVal = parseFloat(String(productForm.offerValue || "0").replace(/[^0-9.]/g, ""));
+    const offerValue = isNaN(rawOfferVal) ? 0 : rawOfferVal;
+
+    if (isOffer) {
+      if (offerValue <= 0) {
+        showNotification("error", "Please enter a discount value greater than 0, or disable the offer switch.");
+        return;
+      }
+      if (offerType === "percentage" && (offerValue < 1 || offerValue >= 100)) {
+        showNotification("error", "Percentage discount must be between 1% and 99%.");
+        return;
+      }
+      if (offerType === "fixed" && offerValue >= price) {
+        showNotification("error", `Flat discount (₹${offerValue}) cannot exceed product price of ₹${price}.`);
+        return;
+      }
+    }
+
+    // Auto-calculate offer price if offer is active
+    let calculatedOfferPrice: number | undefined = undefined;
+    if (isOffer && offerValue > 0) {
+      if (offerType === "percentage") {
+        calculatedOfferPrice = Math.max(0, Math.round(price * (1 - offerValue / 100)));
+      } else {
+        calculatedOfferPrice = Math.max(0, Math.round(price - offerValue));
+      }
     }
 
     setIsSavingProduct(true);
+    let finalProductId = editingProduct?.id;
+    let savedProduct: Product;
+    let firestoreSuccess = false;
+    let serverSuccess = false;
+
     try {
-      const payload: Record<string, any> = {
+      const sanitized = sanitizeProductForFirestore({
         name,
-        category,
+        category: resolvedCategory,
         price,
         unit,
-        description: productForm.description.trim(),
-        isAvailable: productForm.isAvailable
-      };
+        description: productForm.description,
+        isAvailable: productForm.isAvailable,
+        image,
+        imageUrl: image,
+        isOffer,
+        offerType,
+        offerValue: isOffer ? offerValue : undefined,
+        offerPrice: isOffer ? calculatedOfferPrice : undefined,
+        offerStartDate: productForm.offerStartDate ? new Date(productForm.offerStartDate).toISOString() : null,
+        offerEndDate: productForm.offerEndDate ? new Date(productForm.offerEndDate).toISOString() : null,
+        offerEnabled: productForm.offerEnabled
+      });
 
-      if (image) {
-        const formattedImg = formatImageUrl(image);
-        payload.image = formattedImg;
-        payload.imageUrl = formattedImg;
+      // Maintain legacy/customer app compatibility fields
+      sanitized.status = productForm.isAvailable !== false ? "Available" : "Unavailable";
+      sanitized.normalizedCategory = resolvedCategory.toLowerCase();
+
+      if (finalProductId) {
+        // 1. UPDATE EXISTING PRODUCT (Preserve ID strictly, never duplicate)
+        savedProduct = { ...editingProduct, ...sanitized, id: finalProductId, updatedAt: new Date().toISOString() } as Product;
+      } else {
+        // 2. ADD NEW PRODUCT (Generate unique Firestore ID)
+        const newDocRef = doc(collection(db, "products"));
+        finalProductId = newDocRef.id;
+        savedProduct = {
+          ...sanitized,
+          id: finalProductId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        } as unknown as Product;
       }
 
-      // Preserve existing offer fields when editing
-      if (editingProduct?.isOffer !== undefined) {
-        payload.isOffer = editingProduct.isOffer;
-        payload.offerType = editingProduct.offerType;
-        payload.offerValue = editingProduct.offerValue;
-        payload.offerStartDate = editingProduct.offerStartDate;
-        payload.offerEndDate = editingProduct.offerEndDate;
-        payload.offerEnabled = editingProduct.offerEnabled;
-        if (editingProduct.isOffer && editingProduct.offerValue) {
-          if (editingProduct.offerType === "percentage") {
-            payload.offerPrice = Math.max(0, Math.round(price * (1 - editingProduct.offerValue / 100)));
-          } else {
-            payload.offerPrice = Math.max(0, Math.round(price - editingProduct.offerValue));
-          }
-        }
+      // Step 1: Direct Firestore SDK write (with catch so security rules or network quirks do not abort flow)
+      try {
+        const docRef = doc(db, "products", finalProductId);
+        await setDoc(docRef, savedProduct, { merge: true });
+        firestoreSuccess = true;
+      } catch (fsErr: any) {
+        console.warn("[Save Product] Direct Firestore write notice:", fsErr?.message || fsErr);
       }
 
-      let savedProduct: Product | null = null;
+      // Step 2: Server API write (updates disk persistence, memory cache, and server-side Firestore sync)
+      try {
+        const authHeader = auth.currentUser ? `Bearer ${await auth.currentUser.getIdToken().catch(() => "")}` : undefined;
+        const apiMethod = editingProduct ? "PUT" : "POST";
+        const apiUrl = editingProduct ? `/api/products/${encodeURIComponent(finalProductId)}` : `/api/products`;
+        
+        const res = await fetch(apiUrl, {
+          method: apiMethod,
+          headers: {
+            "Content-Type": "application/json",
+            ...(authHeader ? { Authorization: authHeader } : {})
+          },
+          body: JSON.stringify(savedProduct)
+        });
 
-      if (editingProduct?.id) {
-        const prodId = editingProduct.id;
-        // 1. Try Firestore client SDK
-        try {
-          await updateDoc(doc(db, "products", prodId), payload);
-          savedProduct = { ...editingProduct, ...payload, id: prodId };
-        } catch (fsErr: any) {
-          console.warn("[Product Edit] Direct Firestore update notice, syncing with server API:", fsErr?.message || fsErr);
-        }
-
-        // 2. Server API sync / fallback
-        if (!savedProduct) {
-          const res = await fetch(`/api/products/${encodeURIComponent(prodId)}`, {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              ...(auth.currentUser ? { Authorization: `Bearer ${await auth.currentUser.getIdToken()}` } : {})
-            },
-            body: JSON.stringify({ ...payload, id: prodId })
-          });
-          if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || `Failed to update product (HTTP ${res.status})`);
+        if (res.ok) {
+          serverSuccess = true;
+          const json = await res.json().catch(() => ({}));
+          if (json.product) {
+            savedProduct = { ...savedProduct, ...json.product };
           }
-          const resData = await res.json();
-          savedProduct = resData.product || { ...editingProduct, ...payload, id: prodId };
         } else {
-          // Sync server background cache as well
-          fetch(`/api/products/${encodeURIComponent(prodId)}`, {
-            method: "PUT",
+          console.warn("[Save Product] Server API returned HTTP", res.status);
+        }
+      } catch (srvErr: any) {
+        console.warn("[Save Product] Server API sync notice:", srvErr?.message || srvErr);
+      }
+
+      // If either Firestore OR Server succeeded (or both), commit save!
+      if (firestoreSuccess || serverSuccess) {
+        // If user created a custom category, persist to Firestore categories collection & backend
+        if (productForm.isCustomCategory && resolvedCategory) {
+          try {
+            await addDoc(collection(db, "categories"), {
+              name: resolvedCategory,
+              createdAt: new Date().toISOString()
+            });
+          } catch (catErr) {
+            console.warn("[Categories] Firestore addDoc notice:", catErr);
+          }
+          fetch("/api/categories", {
+            method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...payload, id: prodId })
+            body: JSON.stringify({ name: resolvedCategory })
           }).catch(() => {});
         }
 
+        // Update state and localStorage cache immediately
         setProducts((prev) => {
-          const next = prev.map((p) =>
-            p.id === prodId ? { ...p, ...savedProduct!, id: prodId } : p
+          const filtered = prev.filter((p) => p.id !== finalProductId);
+          const updatedList = [savedProduct, ...filtered].sort((a, b) =>
+            (a.name || "").localeCompare(b.name || "")
           );
           try {
-            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+            localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(updatedList));
           } catch {}
-          return next;
+          return updatedList;
         });
-        showNotification("success", `Product "${name}" updated successfully`);
-      } else {
-        // Adding new product
-        // 1. Try Firestore client SDK
-        try {
-          const newDocRef = await addDoc(collection(db, "products"), payload);
-          savedProduct = { id: newDocRef.id, ...payload } as Product;
-        } catch (fsErr: any) {
-          console.warn("[Product Add] Direct Firestore add notice, creating via server API:", fsErr?.message || fsErr);
-        }
 
-        // 2. Server API fallback if direct write failed
-        if (!savedProduct) {
-          const res = await fetch("/api/products", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(auth.currentUser ? { Authorization: `Bearer ${await auth.currentUser.getIdToken()}` } : {})
-            },
-            body: JSON.stringify(payload)
-          });
-          if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            throw new Error(errJson.error || `Failed to create product (HTTP ${res.status})`);
-          }
-          const resData = await res.json();
-          savedProduct = resData.product;
-        } else {
-          // Sync server background cache
-          fetch("/api/products", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(savedProduct)
-          }).catch(() => {});
-        }
-
-        if (savedProduct) {
-          setProducts((prev) => {
-            const next = [savedProduct!, ...prev.filter((p) => p.id !== savedProduct!.id)].sort(
-              (a, b) => (a.name || "").localeCompare(b.name || "")
+        // Update categories list if custom category added
+        setCategories((prev) => {
+          if (!prev.some((c) => c.name.toLowerCase() === resolvedCategory.toLowerCase())) {
+            const updated = [...prev, { id: `cat_${Date.now()}`, name: resolvedCategory }].sort((a, b) =>
+              a.name.localeCompare(b.name)
             );
             try {
-              localStorage.setItem("zypsomart_cached_products_v2", JSON.stringify(next));
+              localStorage.setItem("zypsomart_cached_categories_v2", JSON.stringify(updated));
             } catch {}
-            return next;
-          });
-          showNotification("success", `Product "${name}" added successfully`);
-        }
-      }
+            return updated;
+          }
+          return prev;
+        });
 
-      setShowProductModal(false);
-      setEditingProduct(null);
-      setProductForm({
-        name: "",
-        category: "",
-        price: "",
-        unit: "piece",
-        image: "",
-        description: "",
-        isAvailable: true
-      });
+        // Success notification
+        showNotification(
+          "success",
+          editingProduct
+            ? `Product "${name}" updated successfully!`
+            : `Product "${name}" saved successfully!`
+        );
+
+        setShowProductModal(false);
+        setEditingProduct(null);
+        setProductForm({
+          name: "",
+          category: "",
+          customCategory: "",
+          isCustomCategory: false,
+          price: "",
+          unit: "piece",
+          image: "",
+          description: "",
+          isAvailable: true,
+          isOffer: false,
+          offerType: "percentage",
+          offerValue: "",
+          offerStartDate: "",
+          offerEndDate: "",
+          offerEnabled: true
+        });
+
+        // Background refresh to keep in sync without full reload
+        fetchProducts(true);
+        fetchCategories(true);
+      } else {
+        throw new Error("Unable to save product to Firestore or server. Please check your connection.");
+      }
     } catch (err: any) {
       console.error("[Save Product] Error:", err);
-      showNotification("error", "Failed: " + err.message);
+      showNotification("error", `Failed to save product: ${err?.message || "Unknown error"}`);
     } finally {
       setIsSavingProduct(false);
     }
-  };
-
-  // Open Edit Product Modal
-  const openEditProductModal = (product: Product) => {
-    setEditingProduct(product);
-    setProductForm({
-      name: product.name,
-      category: product.category,
-      price: product.price.toString(),
-      unit: product.unit || "piece",
-      image: product.imageUrl || product.image || "",
-      description: product.description || "",
-      isAvailable: product.isAvailable !== false
-    });
-    setShowProductModal(true);
   };
 
   // Delete Product with optimistic cache sync & server fallback
   const handleDeleteProduct = async (productId: string) => {
     const product = products.find((p) => p.id === productId);
     const prodName = product?.name || "Product";
-    if (window.confirm(`Are you sure you want to delete "${prodName}"?`)) {
+    if (window.confirm(`Are you sure you want to delete "${prodName}" from the store catalog?`)) {
       try {
         setProducts((prev) => {
           const next = prev.filter((p) => p.id !== productId);
@@ -2141,14 +2343,14 @@ function AdminDashboard() {
           return next;
         });
 
-        // 1. Try Firestore client SDK
+        // Direct Firestore delete
         try {
           await deleteDoc(doc(db, "products", productId));
         } catch (fsErr) {
           console.warn("[Product Delete] Firestore direct delete notice:", fsErr);
         }
 
-        // 2. Server API sync
+        // Server API sync
         await fetch(`/api/products/${encodeURIComponent(productId)}`, {
           method: "DELETE"
         }).catch(() => {});
@@ -2163,10 +2365,11 @@ function AdminDashboard() {
 
   // Open Offer Modal for a product
   const openOfferModal = (product: Product) => {
+    if (!product) return;
     setProductForOffer(product);
     setOfferForm({
       offerType: product.offerType || "percentage",
-      offerValue: product.offerValue !== undefined ? String(product.offerValue) : "",
+      offerValue: product.offerValue !== undefined && product.offerValue !== null ? String(product.offerValue) : "",
       offerStartDate: product.offerStartDate ? product.offerStartDate.slice(0, 16) : "",
       offerEndDate: product.offerEndDate ? product.offerEndDate.slice(0, 16) : "",
       offerEnabled: product.offerEnabled !== false
@@ -2174,7 +2377,7 @@ function AdminDashboard() {
     setShowOfferModal(true);
   };
 
-  // Save / Update Offer on a product
+  // Save / Update Offer on a product (stores directly in Firestore with zero undefined fields)
   const handleSaveOffer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!productForOffer || isSavingOffer) return;
@@ -2217,17 +2420,18 @@ function AdminDashboard() {
         offerPrice: calculatedPrice,
         offerStartDate: offerForm.offerStartDate ? new Date(offerForm.offerStartDate).toISOString() : null,
         offerEndDate: offerForm.offerEndDate ? new Date(offerForm.offerEndDate).toISOString() : null,
-        offerEnabled: Boolean(offerForm.offerEnabled)
+        offerEnabled: Boolean(offerForm.offerEnabled),
+        updatedAt: new Date().toISOString()
       };
 
-      // 1. Try Firestore client SDK
+      // 1. Direct Firestore setDoc with merge: true (never throws unsupported undefined)
       try {
-        await updateDoc(doc(db, "products", productForOffer.id), offerPayload);
-      } catch (fsErr) {
-        console.warn("[Offer Save] Direct Firestore update notice:", fsErr);
+        await setDoc(doc(db, "products", productForOffer.id), offerPayload, { merge: true });
+      } catch (fsErr: any) {
+        console.warn("[Offer Save] Direct Firestore update notice:", fsErr?.message || fsErr);
       }
 
-      // 2. Server API sync / fallback
+      // 2. Server API sync
       await fetch(`/api/products/${encodeURIComponent(productForOffer.id)}/offer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2258,7 +2462,7 @@ function AdminDashboard() {
     }
   };
 
-  // Remove Offer from a product
+  // Remove Offer from a product (Preserves original catalog product at regular price)
   const handleRemoveOffer = async (productId: string) => {
     const product = products.find((p) => p.id === productId);
     if (!product) return;
@@ -2271,23 +2475,20 @@ function AdminDashboard() {
       try {
         const resetPayload = {
           isOffer: false,
-          offerType: undefined,
-          offerValue: undefined,
-          offerPrice: undefined,
+          offerType: null,
+          offerValue: 0,
+          offerPrice: product.price,
           offerStartDate: null,
           offerEndDate: null,
-          offerEnabled: false
+          offerEnabled: false,
+          updatedAt: new Date().toISOString()
         };
 
-        // 1. Try Firestore client SDK
+        // 1. Direct Firestore setDoc with merge: true (zero undefined fields)
         try {
-          await updateDoc(doc(db, "products", productId), {
-            isOffer: false,
-            offerEnabled: false,
-            offerPrice: product.price
-          });
-        } catch (fsErr) {
-          console.warn("[Offer Remove] Direct Firestore update notice:", fsErr);
+          await setDoc(doc(db, "products", productId), resetPayload, { merge: true });
+        } catch (fsErr: any) {
+          console.warn("[Offer Remove] Direct Firestore update notice:", fsErr?.message || fsErr);
         }
 
         // 2. Server API sync
@@ -2329,13 +2530,14 @@ function AdminDashboard() {
         return next;
       });
 
-      // 1. Try Firestore client SDK
+      // 1. Direct Firestore update
       try {
-        await updateDoc(doc(db, "products", productId), {
-          offerEnabled: nextEnabled
-        });
-      } catch (fsErr) {
-        console.warn("[Toggle Offer] Direct Firestore update notice:", fsErr);
+        await setDoc(doc(db, "products", productId), {
+          offerEnabled: nextEnabled,
+          updatedAt: new Date().toISOString()
+        }, { merge: true });
+      } catch (fsErr: any) {
+        console.warn("[Toggle Offer] Direct Firestore update notice:", fsErr?.message || fsErr);
       }
 
       // 2. Server API sync
@@ -2351,6 +2553,89 @@ function AdminDashboard() {
       );
     } catch (err: any) {
       showNotification("error", "Error updating offer status: " + err.message);
+    }
+  };
+
+  // Customer Cart helper functions
+  const handleUpdateCustomerCart = (productId: string, delta: number) => {
+    setCustomerCart((prev) => {
+      const current = prev[productId] || 0;
+      const next = Math.max(0, current + delta);
+      const updated = { ...prev };
+      if (next === 0) {
+        delete updated[productId];
+      } else {
+        updated[productId] = next;
+      }
+      return updated;
+    });
+  };
+
+  // Place real customer test order in Firestore
+  const handlePlaceCustomerTestOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cartEntries = Object.entries(customerCart);
+    if (cartEntries.length === 0) {
+      showNotification("error", "Your customer cart is empty. Add items first.");
+      return;
+    }
+
+    const items = cartEntries
+      .map(([prodId, qty]) => {
+        const p = products.find((prod) => prod.id === prodId);
+        if (!p) return null;
+        const pricing = getProductPricing(p);
+        const effectivePrice = pricing.hasActiveOffer ? pricing.finalPrice : pricing.originalPrice;
+        return {
+          name: p.name,
+          qty,
+          price: effectivePrice
+        };
+      })
+      .filter(Boolean) as { name: string; qty: number; price: number }[];
+
+    if (items.length === 0) {
+      showNotification("error", "No valid items in cart.");
+      return;
+    }
+
+    const subtotal = items.reduce((acc, it) => acc + it.price * it.qty, 0);
+    const deliveryFee = subtotal >= 199 ? 0 : 25;
+    const finalTotal = subtotal + deliveryFee;
+
+    setIsPlacingCustomerOrder(true);
+    try {
+      const newOrderRef = doc(collection(db, "orders"));
+      const orderPayload = {
+        id: newOrderRef.id,
+        customerName: customerCheckoutForm.name.trim() || "Customer",
+        customerPhone: customerCheckoutForm.phone.trim() || "9876543210",
+        customerAddress: customerCheckoutForm.address.trim() || "Delivery Address",
+        items,
+        total: finalTotal,
+        status: "pending",
+        orderStatus: "pending",
+        deliveryStatus: "pending",
+        paymentMethod: customerCheckoutForm.paymentMethod,
+        paymentStatus: customerCheckoutForm.paymentMethod === "Razorpay" ? "Paid Online" : "Pending COD",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      await setDoc(newOrderRef, orderPayload);
+
+      showNotification(
+        "success",
+        `🎉 Customer Order #${newOrderRef.id.slice(0, 8)} placed successfully! Total: ₹${finalTotal}`
+      );
+      setCustomerCart({});
+      setShowCustomerPreviewModal(false);
+      setActiveTab("orders");
+    } catch (err: any) {
+      console.error("[Customer Order] Error placing order:", err);
+      showNotification("error", `Failed to place customer order: ${err?.message || "Unknown error"}`);
+    } finally {
+      setIsPlacingCustomerOrder(false);
     }
   };
 
@@ -2418,16 +2703,24 @@ function AdminDashboard() {
     return list.sort((a, b) => getTimestampMs(b.createdAt) - getTimestampMs(a.createdAt));
   }, [searchedOrders, statusFilter]);
 
-  // Filtered products list memoized by debounced search query
+  // Filtered products list memoized by debounced search query and category filter
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return products;
-    return products.filter(
-      (p) =>
+    return products.filter((p) => {
+      if (!p) return false;
+      const matchesSearch =
+        !q ||
         (p.name || "").toLowerCase().includes(q) ||
-        (p.category || "").toLowerCase().includes(q)
-    );
-  }, [products, searchQuery]);
+        (p.category || "").toLowerCase().includes(q) ||
+        (p.description || "").toLowerCase().includes(q);
+
+      const matchesCategory =
+        productCategoryFilter === "all" ||
+        (p.category || "").trim().toLowerCase() === productCategoryFilter.toLowerCase();
+
+      return matchesSearch && matchesCategory;
+    });
+  }, [products, searchQuery, productCategoryFilter]);
 
   // Memoized offer statistics and filtered offer products for Offer Management Tab
   const offerStats = useMemo(() => {
@@ -3136,21 +3429,20 @@ function AdminDashboard() {
                 </button>
               )}
 
+              {/* Live Customer Store Preview & Test Checkout Trigger */}
+              <button
+                onClick={() => setShowCustomerPreviewModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/90 rounded-xl font-bold transition-all text-xs sm:text-sm shrink-0 cursor-pointer active:scale-95 shadow-2xs"
+                title="Preview live customer store and test checkout with active offers"
+              >
+                <Eye size={15} className="stroke-[2.5]" />
+                <span className="hidden sm:inline">Customer Store Preview</span>
+                <span className="sm:hidden">Preview</span>
+              </button>
+
               {activeTab === "products" && (
                 <button
-                  onClick={() => {
-                    setEditingProduct(null);
-                    setProductForm({
-                      name: "",
-                      category: "",
-                      price: "",
-                      unit: "piece",
-                      image: "",
-                      description: "",
-                      isAvailable: true
-                    });
-                    setShowProductModal(true);
-                  }}
+                  onClick={openAddProductModal}
                   className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold transition-all shadow-md shadow-emerald-600/20 text-xs sm:text-sm shrink-0 cursor-pointer active:scale-95"
                 >
                   <Plus size={16} />
@@ -3161,7 +3453,6 @@ function AdminDashboard() {
               {activeTab === "offers" && (
                 <button
                   onClick={() => {
-                    // Switch to products tab with a quick hint to pick a product or add to offer
                     setActiveTab("products");
                     showNotification("success", "Select any product below and click 'Add to Offer' or 'Edit Deal' to configure discounts.");
                   }}
@@ -3255,7 +3546,7 @@ function AdminDashboard() {
                     </button>
                   </div>
 
-                  <form onSubmit={handleSaveProduct} className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
+                  <form onSubmit={handleSaveProduct} noValidate className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1">
                     <div className="grid grid-cols-2 gap-4">
                       <div className="col-span-2">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
@@ -3275,30 +3566,81 @@ function AdminDashboard() {
 
                       <div className="col-span-1">
                         <div className="flex items-center justify-between mb-1">
-                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">
-                            Category
+                          <label className="block text-xs font-bold text-slate-500 uppercase tracking-widest">
+                            Category <span className="text-red-500">*</span>
                           </label>
-                          <span className="text-[10px] text-slate-400 font-medium">Type or select</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setProductForm((prev) => ({
+                                ...prev,
+                                isCustomCategory: !prev.isCustomCategory,
+                                customCategory: prev.isCustomCategory ? "" : prev.customCategory || prev.category
+                              }))
+                            }
+                            className="text-[11px] font-bold text-emerald-600 hover:text-emerald-700 underline cursor-pointer"
+                          >
+                            {productForm.isCustomCategory ? "Select from list" : "+ New Category"}
+                          </button>
                         </div>
-                        <input
-                          type="text"
-                          list="product-categories-presets"
-                          required
-                          placeholder="Type or pick category..."
-                          value={productForm.category}
-                          onChange={(e) =>
-                            setProductForm({ ...productForm, category: e.target.value })
-                          }
-                          className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none font-medium text-slate-800 text-sm bg-white"
-                        />
-                        <datalist id="product-categories-presets">
-                          {categories.map((c) => (
-                            <option key={c.id} value={c.name} />
-                          ))}
-                          {DEFAULT_PRESET_CATEGORIES.map((cat) => (
-                            <option key={`preset-${cat}`} value={cat} />
-                          ))}
-                        </datalist>
+
+                        {productForm.isCustomCategory ? (
+                          <div className="relative">
+                            <input
+                              type="text"
+                              required
+                              placeholder="Type new category name..."
+                              value={productForm.customCategory}
+                              onChange={(e) =>
+                                setProductForm({ ...productForm, customCategory: e.target.value })
+                              }
+                              className="w-full px-4 py-3 rounded-xl border-2 border-emerald-400 focus:ring-2 focus:ring-emerald-500 outline-none font-semibold text-slate-800 text-sm bg-emerald-50/30"
+                              autoFocus
+                            />
+                            <p className="text-[10px] text-slate-400 mt-1">
+                              Will be saved with the product and added to all category lists.
+                            </p>
+                          </div>
+                        ) : (
+                          <select
+                            required
+                            value={productForm.category}
+                            onChange={(e) => {
+                              if (e.target.value === "__ADD_NEW__") {
+                                setProductForm({
+                                  ...productForm,
+                                  isCustomCategory: true,
+                                  customCategory: ""
+                                });
+                              } else {
+                                setProductForm({
+                                  ...productForm,
+                                  category: e.target.value
+                                });
+                              }
+                            }}
+                            className="w-full px-4 py-3 rounded-xl border border-slate-200 focus:ring-2 focus:ring-emerald-500 outline-none font-semibold text-slate-800 text-sm bg-white cursor-pointer"
+                          >
+                            <option value="" disabled>-- Select a Category --</option>
+                            {categories.map((c) => (
+                              <option key={c.id} value={c.name}>
+                                {c.name}
+                              </option>
+                            ))}
+                            {/* Include current category if not in categories list */}
+                            {productForm.category &&
+                              !categories.some(
+                                (c) => c.name.toLowerCase() === productForm.category.toLowerCase()
+                              ) && (
+                                <option value={productForm.category}>
+                                  {productForm.category} (Current)
+                                </option>
+                              )}
+                            <option value="__ADD_NEW__" className="font-bold text-emerald-600 bg-emerald-50">
+                              + Add New Category...
+                            </option>
+                          </select>
+                        )}
                       </div>
 
                       <div>
@@ -3380,13 +3722,12 @@ function AdminDashboard() {
 
                       <div className="col-span-2">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">
-                          Image URL {editingProduct && <span className="text-slate-400 font-normal lowercase">(direct image link, Drive or Dropbox)</span>}
+                          Image URL <span className="text-slate-400 font-normal lowercase">(optional direct link, Drive or Dropbox)</span>
                         </label>
                         <div className="flex gap-3">
                           <input
                             type="text"
-                            required={!editingProduct}
-                            placeholder="Google Drive, Dropbox, or direct link"
+                            placeholder="Direct image link, Google Drive, or Dropbox (optional)"
                             value={productForm.image}
                             onChange={(e) =>
                               setProductForm({ ...productForm, image: e.target.value })
@@ -3408,7 +3749,7 @@ function AdminDashboard() {
                           )}
                         </div>
                         <p className="mt-1 text-[10px] text-slate-400">
-                          Links from Google Drive & Dropbox will be automatically converted to direct images.
+                          Links from Google Drive & Dropbox will be automatically converted to direct images. A quality placeholder is used if left blank.
                         </p>
                       </div>
 
@@ -3448,6 +3789,139 @@ function AdminDashboard() {
                           />
                         </button>
                       </div>
+
+                      {/* Integrated Offer / Discount Configuration Section */}
+                      <div className="col-span-2 bg-gradient-to-br from-amber-50/70 via-orange-50/40 to-amber-50/80 border border-amber-200/90 rounded-2xl p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <div className="w-7 h-7 rounded-lg bg-amber-500 text-white flex items-center justify-center shadow-xs">
+                              <BadgePercent size={16} />
+                            </div>
+                            <div>
+                              <span className="text-xs font-black text-amber-950 block">Special Offer / Promotional Deal</span>
+                              <span className="text-[10px] text-amber-800 font-medium">Add discount badge & offer price for customers</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setProductForm({ ...productForm, isOffer: !productForm.isOffer })}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer ${
+                              productForm.isOffer ? "bg-amber-500" : "bg-slate-300"
+                            }`}
+                            title={productForm.isOffer ? "Disable offer" : "Enable offer"}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                productForm.isOffer ? "translate-x-6" : "translate-x-1"
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        {productForm.isOffer && (
+                          <div className="space-y-3 pt-2 border-t border-amber-200/60">
+                            {/* Offer Type selector */}
+                            <div>
+                              <label className="block text-[11px] font-bold text-amber-900 uppercase tracking-wider mb-1.5">
+                                Discount Type
+                              </label>
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setProductForm({ ...productForm, offerType: "percentage" })}
+                                  className={`py-2 px-3 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                                    productForm.offerType === "percentage"
+                                      ? "bg-amber-500 text-white border-amber-600 shadow-2xs"
+                                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <Percent size={13} />
+                                  <span>Percentage (%)</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setProductForm({ ...productForm, offerType: "fixed" })}
+                                  className={`py-2 px-3 rounded-xl border text-xs font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                                    productForm.offerType === "fixed"
+                                      ? "bg-amber-500 text-white border-amber-600 shadow-2xs"
+                                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <IndianRupee size={13} />
+                                  <span>Flat Discount (₹)</span>
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Discount Value */}
+                            <div>
+                              <label className="block text-[11px] font-bold text-amber-900 uppercase tracking-wider mb-1">
+                                {productForm.offerType === "percentage" ? "Discount Percentage (1% - 99%)" : "Flat Discount Amount (₹)"}
+                              </label>
+                              <input
+                                type="number"
+                                step="any"
+                                placeholder={productForm.offerType === "percentage" ? "e.g. 20" : "e.g. 15"}
+                                value={productForm.offerValue}
+                                onChange={(e) => setProductForm({ ...productForm, offerValue: e.target.value })}
+                                className="w-full px-3.5 py-2 bg-white rounded-xl border border-amber-300 text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-amber-500"
+                              />
+                            </div>
+
+                            {/* Live calculation banner */}
+                            {(() => {
+                              const p = Number(productForm.price) || 0;
+                              const val = Number(productForm.offerValue) || 0;
+                              let calcPrice = p;
+                              if (val > 0) {
+                                if (productForm.offerType === "percentage" && val < 100) {
+                                  calcPrice = Math.max(0, Math.round(p * (1 - val / 100)));
+                                } else if (productForm.offerType === "fixed" && val < p) {
+                                  calcPrice = Math.max(0, Math.round(p - val));
+                                }
+                              }
+                              return (
+                                <div className="bg-white/90 rounded-xl p-2.5 border border-amber-200 flex items-center justify-between text-xs">
+                                  <span className="text-slate-500 font-medium">Customer Offer Price:</span>
+                                  <div className="flex items-center gap-2">
+                                    {val > 0 && calcPrice < p && (
+                                      <span className="text-slate-400 line-through text-[11px]">₹{p}</span>
+                                    )}
+                                    <span className="font-black text-sm text-emerald-600">₹{calcPrice}</span>
+                                    {val > 0 && calcPrice < p && (
+                                      <span className="bg-amber-100 text-amber-800 font-extrabold text-[10px] px-1.5 py-0.5 rounded">
+                                        {productForm.offerType === "percentage" ? `${val}% OFF` : `₹${val} OFF`}
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Optional dates */}
+                            <div className="grid grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 mb-0.5">Start Date (Optional)</label>
+                                <input
+                                  type="datetime-local"
+                                  value={productForm.offerStartDate}
+                                  onChange={(e) => setProductForm({ ...productForm, offerStartDate: e.target.value })}
+                                  className="w-full px-2.5 py-1.5 bg-white rounded-lg border border-slate-200 text-[11px] outline-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold text-slate-500 mb-0.5">End Date (Optional)</label>
+                                <input
+                                  type="datetime-local"
+                                  value={productForm.offerEndDate}
+                                  onChange={(e) => setProductForm({ ...productForm, offerEndDate: e.target.value })}
+                                  className="w-full px-2.5 py-1.5 bg-white rounded-lg border border-slate-200 text-[11px] outline-none"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex gap-3 pt-4">
@@ -3461,7 +3935,12 @@ function AdminDashboard() {
                       <button
                         type="submit"
                         disabled={isSavingProduct}
-                        className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 cursor-pointer"
+                        onClick={(e) => {
+                          if (!isSavingProduct) {
+                            handleSaveProduct(e);
+                          }
+                        }}
+                        className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-100 flex items-center justify-center gap-2 cursor-pointer"
                       >
                         {isSavingProduct ? (
                           <>
@@ -3759,6 +4238,369 @@ function AdminDashboard() {
                       </button>
                     </div>
                   </form>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Customer Store Preview & Test Checkout Modal */}
+          <AnimatePresence>
+            {showCustomerPreviewModal && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[180] flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm"
+              >
+                <motion.div
+                  initial={{ scale: 0.95, y: 20 }}
+                  animate={{ scale: 1, y: 0 }}
+                  className="bg-slate-50 rounded-2xl sm:rounded-3xl shadow-2xl max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden border border-slate-200"
+                >
+                  {/* Top Header */}
+                  <div className="p-4 sm:p-5 bg-white border-b border-slate-200 flex items-center justify-between shrink-0">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white flex items-center justify-center shadow-sm">
+                        <ShoppingBag size={20} />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                            Zypsomart Customer Store Preview
+                          </h3>
+                          <span className="bg-indigo-100 text-indigo-800 text-[10px] font-black px-2 py-0.5 rounded-full uppercase">
+                            Live Customer View
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-500">
+                          Verify offer badges, strikethrough prices, cart calculations & test COD / Razorpay checkout
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowCustomerPreviewModal(false)}
+                      className="p-2 hover:bg-slate-100 rounded-full transition-colors cursor-pointer text-slate-400 hover:text-slate-700"
+                      title="Close Preview"
+                    >
+                      <X size={20} />
+                    </button>
+                  </div>
+
+                  {/* Body: 2 columns on desktop (Product Catalog + Cart / Checkout) */}
+                  <div className="flex-1 overflow-y-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    {/* Left: Product Catalog (2 cols) */}
+                    <div className="lg:col-span-2 space-y-4">
+                      {/* Shop Status Banner */}
+                      <div className={`p-3 rounded-xl border flex items-center justify-between text-xs font-bold ${
+                        isShopOpen
+                          ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+                          : "bg-red-50 border-red-200 text-red-800"
+                      }`}>
+                        <div className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${isShopOpen ? "bg-emerald-500 animate-pulse" : "bg-red-500"}`} />
+                          <span>{isShopOpen ? "Store is currently OPEN — Orders are accepted" : "Store is currently CLOSED — Orders are paused"}</span>
+                        </div>
+                        <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded bg-white/70">
+                          {isShopOpen ? "OPEN" : "CLOSED"}
+                        </span>
+                      </div>
+
+                      {/* Filter & Search */}
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <div className="relative flex-1">
+                          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="Search products in customer catalog..."
+                            value={customerPreviewSearch}
+                            onChange={(e) => setCustomerPreviewSearch(e.target.value)}
+                            className="w-full pl-9 pr-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-medium outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                        </div>
+                        <select
+                          value={customerPreviewCategory}
+                          onChange={(e) => setCustomerPreviewCategory(e.target.value)}
+                          className="px-3 py-2 bg-white rounded-xl border border-slate-200 text-xs font-bold text-slate-700 outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                          <option value="all">All Categories</option>
+                          {categories.map((c) => (
+                            <option key={c.id} value={c.name}>{c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Products Grid */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {products
+                          .filter((p) => {
+                            if (!p.isAvailable) return false;
+                            if (customerPreviewCategory !== "all" && p.category !== customerPreviewCategory) return false;
+                            if (customerPreviewSearch) {
+                              const q = customerPreviewSearch.toLowerCase();
+                              return (p.name || "").toLowerCase().includes(q) || (p.category || "").toLowerCase().includes(q);
+                            }
+                            return true;
+                          })
+                          .map((prod) => {
+                            const pricing = getProductPricing(prod);
+                            const inCartQty = customerCart[prod.id] || 0;
+                            const effectivePrice = pricing.hasActiveOffer ? pricing.finalPrice : pricing.originalPrice;
+
+                            return (
+                              <div
+                                key={`preview-${prod.id}`}
+                                className="bg-white rounded-xl border border-slate-200 p-3 flex flex-col justify-between shadow-2xs hover:shadow-xs transition-all relative overflow-hidden"
+                              >
+                                {pricing.hasActiveOffer && (
+                                  <div className="absolute top-2 right-2 bg-gradient-to-r from-amber-500 to-orange-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded shadow-xs uppercase tracking-wider flex items-center gap-1">
+                                    <Flame size={10} />
+                                    <span>{pricing.discountText}</span>
+                                  </div>
+                                )}
+
+                                <div className="flex gap-2.5 mb-2.5">
+                                  <div className="w-14 h-14 rounded-lg bg-slate-50 border border-slate-100 flex items-center justify-center p-1 shrink-0 overflow-hidden">
+                                    <img
+                                      src={formatImageUrl(prod.imageUrl || prod.image || "")}
+                                      alt={prod.name}
+                                      loading="lazy"
+                                      className="w-full h-full object-contain"
+                                      onError={handleImgError}
+                                    />
+                                  </div>
+                                  <div className="min-w-0 flex-1 pr-12">
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block truncate">
+                                      {prod.category} {prod.unit ? `• ${prod.unit}` : ""}
+                                    </span>
+                                    <h4 className="font-bold text-slate-900 text-xs truncate leading-snug">
+                                      {prod.name}
+                                    </h4>
+                                    <div className="flex items-baseline gap-1.5 mt-1">
+                                      <span className="font-black text-sm text-emerald-600">
+                                        ₹{effectivePrice}
+                                      </span>
+                                      {pricing.hasActiveOffer && (
+                                        <span className="text-[11px] font-semibold text-slate-400 line-through">
+                                          ₹{pricing.originalPrice}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+                                  <span className="text-[10px] font-semibold text-slate-500">
+                                    {prod.unit ? `Per ${prod.unit}` : "Per item"}
+                                  </span>
+                                  {inCartQty === 0 ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUpdateCustomerCart(prod.id, 1)}
+                                      className="px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-all cursor-pointer shadow-xs active:scale-95"
+                                    >
+                                      + Add to Cart
+                                    </button>
+                                  ) : (
+                                    <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg p-0.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateCustomerCart(prod.id, -1)}
+                                        className="w-6 h-6 rounded bg-white hover:bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-xs cursor-pointer shadow-2xs"
+                                      >
+                                        <Minus size={12} />
+                                      </button>
+                                      <span className="text-xs font-black text-emerald-800 px-1">
+                                        {inCartQty}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleUpdateCustomerCart(prod.id, 1)}
+                                        className="w-6 h-6 rounded bg-emerald-600 text-white hover:bg-emerald-700 flex items-center justify-center font-bold text-xs cursor-pointer shadow-2xs"
+                                      >
+                                        <Plus size={12} />
+                                      </button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+
+                    {/* Right: Cart & Test Checkout Form (1 col) */}
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-center justify-between mb-3 pb-2 border-b border-slate-100">
+                          <div className="flex items-center gap-1.5 font-bold text-sm text-slate-900">
+                            <ShoppingCart size={16} className="text-emerald-600" />
+                            <span>Customer Cart</span>
+                          </div>
+                          <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
+                            {Object.values(customerCart).reduce((a: number, b: number) => a + b, 0)} items
+                          </span>
+                        </div>
+
+                        {/* Cart Items list */}
+                        {Object.entries(customerCart).length === 0 ? (
+                          <div className="py-8 text-center text-slate-400">
+                            <ShoppingCart size={32} className="mx-auto mb-2 opacity-40" />
+                            <p className="text-xs font-medium">Cart is currently empty.</p>
+                            <p className="text-[11px] text-slate-400">Click "+ Add to Cart" on any product to test live pricing.</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-2 max-h-48 overflow-y-auto pr-1 mb-4">
+                            {Object.entries(customerCart).map(([prodId, qty]) => {
+                              const p = products.find((prod) => prod.id === prodId);
+                              if (!p) return null;
+                              const pricing = getProductPricing(p);
+                              const price = pricing.hasActiveOffer ? pricing.finalPrice : pricing.originalPrice;
+                              const numQty = Number(qty) || 0;
+                              const itemTotal = price * numQty;
+
+                              return (
+                                <div
+                                  key={`cart-item-${prodId}`}
+                                  className="flex items-center justify-between text-xs py-1.5 border-b border-slate-50"
+                                >
+                                  <div className="min-w-0 flex-1 pr-2">
+                                    <p className="font-bold text-slate-800 truncate">{p.name}</p>
+                                    <p className="text-[10px] text-slate-400">
+                                      ₹{price} × {numQty} {p.unit || "pc"}
+                                      {pricing.hasActiveOffer && (
+                                        <span className="text-amber-600 font-bold ml-1">({pricing.discountText})</span>
+                                      )}
+                                    </p>
+                                  </div>
+                                  <span className="font-black text-slate-900">₹{itemTotal}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {/* Checkout Form */}
+                        <form onSubmit={handlePlaceCustomerTestOrder} className="space-y-2.5 pt-3 border-t border-slate-100">
+                          <p className="text-[11px] font-black uppercase text-slate-400 tracking-wider">
+                            Customer Checkout Details
+                          </p>
+
+                          <div>
+                            <input
+                              type="text"
+                              required
+                              placeholder="Customer Name"
+                              value={customerCheckoutForm.name}
+                              onChange={(e) => setCustomerCheckoutForm({ ...customerCheckoutForm, name: e.target.value })}
+                              className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium outline-none focus:ring-1 focus:ring-emerald-500"
+                            />
+                          </div>
+
+                          <div>
+                            <input
+                              type="tel"
+                              required
+                              placeholder="Customer Mobile (10 digits)"
+                              value={customerCheckoutForm.phone}
+                              onChange={(e) => setCustomerCheckoutForm({ ...customerCheckoutForm, phone: e.target.value })}
+                              className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium outline-none focus:ring-1 focus:ring-emerald-500"
+                            />
+                          </div>
+
+                          <div>
+                            <input
+                              type="text"
+                              required
+                              placeholder="Delivery Address"
+                              value={customerCheckoutForm.address}
+                              onChange={(e) => setCustomerCheckoutForm({ ...customerCheckoutForm, address: e.target.value })}
+                              className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-medium outline-none focus:ring-1 focus:ring-emerald-500"
+                            />
+                          </div>
+
+                          {/* Payment method selector: COD vs Razorpay */}
+                          <div>
+                            <label className="block text-[10px] font-bold text-slate-500 mb-1">Payment Method</label>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setCustomerCheckoutForm({ ...customerCheckoutForm, paymentMethod: "COD" })}
+                                className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                                  customerCheckoutForm.paymentMethod === "COD"
+                                    ? "bg-emerald-50 text-emerald-800 border-emerald-400 shadow-2xs"
+                                    : "bg-white text-slate-600 border-slate-200"
+                                }`}
+                              >
+                                💵 Cash on Delivery
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setCustomerCheckoutForm({ ...customerCheckoutForm, paymentMethod: "Razorpay" })}
+                                className={`py-1.5 px-2 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                                  customerCheckoutForm.paymentMethod === "Razorpay"
+                                    ? "bg-indigo-50 text-indigo-800 border-indigo-400 shadow-2xs"
+                                    : "bg-white text-slate-600 border-slate-200"
+                                }`}
+                              >
+                                💳 Razorpay Online
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Total Breakdown */}
+                          {(() => {
+                            const subtotal = Object.entries(customerCart).reduce((acc: number, [prodId, qty]) => {
+                              const p = products.find((prod) => prod.id === prodId);
+                              if (!p) return acc;
+                              const pricing = getProductPricing(p);
+                              const price = pricing.hasActiveOffer ? pricing.finalPrice : pricing.originalPrice;
+                              return acc + price * (Number(qty) || 0);
+                            }, 0);
+                            const delivery = subtotal === 0 ? 0 : subtotal >= 199 ? 0 : 25;
+                            const total = subtotal + delivery;
+
+                            return (
+                              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs space-y-1">
+                                <div className="flex justify-between text-slate-500">
+                                  <span>Subtotal:</span>
+                                  <span>₹{subtotal}</span>
+                                </div>
+                                <div className="flex justify-between text-slate-500">
+                                  <span>Delivery:</span>
+                                  <span>{subtotal === 0 ? "₹0" : delivery === 0 ? "FREE" : "₹25"}</span>
+                                </div>
+                                <div className="flex justify-between font-black text-slate-900 pt-1 border-t border-slate-200 text-sm">
+                                  <span>Order Total:</span>
+                                  <span className="text-emerald-600">₹{total}</span>
+                                </div>
+                              </div>
+                            );
+                          })()}
+
+                          <button
+                            type="submit"
+                            disabled={isPlacingCustomerOrder || Object.keys(customerCart).length === 0}
+                            className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl transition-all shadow-md flex items-center justify-center gap-1.5 cursor-pointer text-xs active:scale-95"
+                          >
+                            {isPlacingCustomerOrder ? (
+                              <>
+                                <RefreshCcw size={14} className="animate-spin" />
+                                <span>Submitting to Firestore...</span>
+                              </>
+                            ) : (
+                              <>
+                                <Check size={14} />
+                                <span>Place Real Customer Order</span>
+                              </>
+                            )}
+                          </button>
+                          <p className="text-[10px] text-center text-slate-400">
+                            Submits directly to Firestore <code className="font-mono">/orders</code> and triggers admin alarm.
+                          </p>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
                 </motion.div>
               </motion.div>
             )}
@@ -5352,17 +6194,73 @@ function AdminDashboard() {
               )}
             </div>
           ) : (
-            /* TAB 2: PRODUCTS MANAGEMENT (With Offer Badges and Offer Buttons) */
-            <div>
+            /* TAB 2: PRODUCTS MANAGEMENT (With Offer Badges, Category Filter & Actions) */
+            <div className="space-y-4">
+              {/* Category Filter & Catalog Summary Bar */}
+              <div className="bg-white rounded-2xl p-3 sm:p-4 border border-slate-200/80 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider shrink-0 flex items-center gap-1.5">
+                    <Filter size={14} className="text-emerald-600" />
+                    <span>Category:</span>
+                  </span>
+                  <select
+                    value={productCategoryFilter}
+                    onChange={(e) => setProductCategoryFilter(e.target.value)}
+                    className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+                  >
+                    <option value="all">All Categories ({products.length})</option>
+                    {categories.map((c) => {
+                      const count = products.filter(
+                        (p) => (p.category || "").trim().toLowerCase() === c.name.trim().toLowerCase()
+                      ).length;
+                      return (
+                        <option key={c.id} value={c.name}>
+                          {c.name} {count > 0 ? `(${count})` : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  {productCategoryFilter !== "all" && (
+                    <button
+                      onClick={() => setProductCategoryFilter("all")}
+                      className="px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer shrink-0"
+                    >
+                      Clear Filter
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between sm:justify-end gap-3 text-xs font-semibold text-slate-500">
+                  <span>
+                    Showing <strong className="text-slate-900">{filteredProducts.length}</strong> of {products.length} products
+                  </span>
+                  <button
+                    onClick={openAddProductModal}
+                    className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold flex items-center gap-1 text-xs cursor-pointer shadow-xs active:scale-95 transition-all"
+                  >
+                    <Plus size={14} />
+                    <span>Add Product</span>
+                  </button>
+                </div>
+              </div>
+
               {filteredProducts.length === 0 ? (
                 <div className="bg-white rounded-2xl p-12 text-center border border-dashed border-slate-300">
                   <Package className="mx-auto text-slate-300 mb-4" size={48} />
                   <h3 className="text-lg font-semibold text-slate-900">No Products Found</h3>
                   <p className="text-slate-500">
-                    {searchQuery
-                      ? "No products match your search criteria."
+                    {searchQuery || productCategoryFilter !== "all"
+                      ? "No products match your search or category filter criteria."
                       : "Your product list will appear here."}
                   </p>
+                  {productCategoryFilter !== "all" && (
+                    <button
+                      onClick={() => setProductCategoryFilter("all")}
+                      className="mt-3 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all cursor-pointer inline-flex items-center gap-1.5"
+                    >
+                      <span>Show All Categories</span>
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3.5 sm:gap-5">
